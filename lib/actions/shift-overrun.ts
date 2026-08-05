@@ -42,14 +42,16 @@ export async function getShiftOverrunStatus(
   const { data: sessions } = await supabase
     .from('sessions')
     .select(
-      'id, session_type, status, started_at, machine:machines(machine_code), user:shopfloor_users!user_id(display_name, shift:shift_patterns(end_time))',
+      'id, session_type, status, started_at, overrun_authorised_at, machine:machines(machine_code), user:shopfloor_users!user_id(display_name, shift:shift_patterns(end_time))',
     )
     .eq('device_id', deviceId)
     .eq('status', 'ACTIVE')
 
   if (!sessions?.length) return []
 
-  // Which of these sessions already have an overrun authorisation recorded?
+  // Legacy authorisations were recorded as a SESSION_RESUME carrying
+  // metadata.overrun_authorised. New ones use sessions.overrun_authorised_at.
+  // Honour both so nothing recorded before the column existed is re-prompted.
   const ids = sessions.map((s) => s.id)
   const { data: authEvents } = await supabase
     .from('session_events')
@@ -68,7 +70,8 @@ export async function getShiftOverrunStatus(
     if (s.session_type === 'UNMANNED') continue
     const endTime = (s.user as any)?.shift?.end_time as string | undefined
     if (!endTime) continue // no shift assigned → never prompt or clamp
-    if (authorised.has(s.id)) continue // operator already confirmed presence
+    if (s.overrun_authorised_at) continue // confirmed (column)
+    if (authorised.has(s.id)) continue // confirmed (legacy marker event)
 
     // Anchor to the end of the shift THIS session belongs to (based on when the
     // work started), not "today" — otherwise overnight or older sessions get a
@@ -94,6 +97,12 @@ export async function getShiftOverrunStatus(
 // Operator confirms (via PIN) they are still at the machine. Records an
 // overrun authorisation so the rest of this session counts as worked time and
 // no further prompts fire. Only the operator on the job may confirm.
+//
+// This now writes sessions.overrun_authorised_at. Previously it was stored
+// only as a SESSION_RESUME event with metadata.overrun_authorised — a fake
+// resume that the timing engine had to remember to filter out of the
+// pause/resume replay, and which corrupted the timeline if ever missed. The
+// event is still written, but purely as an audit record.
 export async function authoriseShiftOverrun(params: {
   sessionId: string
   operatorCode: string
@@ -120,8 +129,20 @@ export async function authoriseShiftOverrun(params: {
     return { ok: false, error: 'Only the operator on this job can confirm.' }
   }
 
+  const { error } = await supabase
+    .from('sessions')
+    .update({
+      overrun_authorised_at: new Date().toISOString(),
+      overrun_authorised_by: user.id,
+    })
+    .eq('id', params.sessionId)
+    .is('overrun_authorised_at', null)
+
+  if (error) return { ok: false, error: 'Could not record the confirmation.' }
+
   await supabase.from('session_events').insert({
     session_id: params.sessionId,
+    // Audit trail only — no longer load-bearing for timing.
     event_type: 'SESSION_RESUME',
     actor_user_id: user.id,
     device_id: params.deviceId,
