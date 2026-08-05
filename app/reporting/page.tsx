@@ -2,13 +2,15 @@ import { getMachineLiveStates } from '@/lib/actions/reporting'
 import { ReportingShell } from './_components/ReportingShell'
 import { MachineStatusGrid } from './_components/MachineStatusGrid'
 import { AutoRefresh } from './_components/AutoRefresh'
+import { MachineStateFilter } from './_components/MachineStateFilter'
 import {
-  MachineStateFilter,
   MACHINE_STATES,
+  ALL_STATES,
   DEFAULT_STATES,
+  GROUP_RANK,
   parseStates,
   type MachineState,
-} from './_components/MachineStateFilter'
+} from '@/lib/reporting/machine-states'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,17 +18,9 @@ type PageProps = {
   searchParams: Promise<{ state?: string }>
 }
 
-// Machines being worked on come first; idle sinks to the bottom. Within a
-// group, longest time in state first — so a three-hour stoppage sits above
-// a ten-minute one without anyone having to sort a column.
-const GROUP_RANK: Record<MachineState, number> = {
-  STOPPED: 0,
-  RUNNING: 0,
-  IN_SETUP: 0,
-  UNMANNED: 0,
-  AWAITING_QC: 1,
-  IDLE: 2,
-}
+// Within a group, longest time in state first — so a three-hour stoppage
+// sits above a ten-minute one without anyone having to sort a column.
+// GROUP_RANK lives in lib/reporting/machine-states.
 
 export default async function ReportingMachinesPage({ searchParams }: PageProps) {
   const sp = await searchParams
@@ -44,7 +38,7 @@ export default async function ReportingMachinesPage({ searchParams }: PageProps)
     ? DEFAULT_STATES
     : requested.length > 0
       ? requested
-      : (MACHINE_STATES.map(s => s.key) as MachineState[])
+      : ALL_STATES
 
   const visible = machines
     .filter(m => selected.includes(m.state))
