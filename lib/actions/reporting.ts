@@ -532,3 +532,64 @@ export async function getSessionIntervals(range: ReportRange) {
       .order('interval_start', { ascending: true }),
   )
 }
+
+// ---- Machine live state (dashboard) ----
+// Reads the derived state view rather than reassembling it in JS. Returns
+// every active machine with its single collapsed state and how long it has
+// been in it — the number the previous dashboard could not answer.
+export type MachineLiveState = {
+  machine_id: string
+  machine_code: string
+  description: string | null
+  state: 'RUNNING' | 'IN_SETUP' | 'UNMANNED' | 'STOPPED' | 'AWAITING_QC' | 'IDLE'
+  state_since: string | null
+  minutes_in_state: number | null
+  last_activity_at: string | null
+  session_id: string | null
+  session_type: string | null
+  mo_number: string | null
+  session_started_at: string | null
+  qty_to_make: number | null
+  qty_made: number | null
+  qty_scrapped: number | null
+  operator_name: string | null
+  operator_role: string | null
+  pause_reason_label: string | null
+  awaiting_qc_mo: string | null
+}
+
+export async function getMachineLiveStates(): Promise<MachineLiveState[]> {
+  const supabase = createServiceClient()
+  const { data, error } = await supabase
+    .from('v_machine_live_state')
+    .select('*')
+    .order('machine_code')
+
+  if (error) throw new Error(`v_machine_live_state: ${error.message}`)
+
+  const now = Date.now()
+  return ((data ?? []) as any[]).map(r => ({
+    machine_id: r.machine_id,
+    machine_code: r.machine_code,
+    description: r.description ?? null,
+    state: r.state,
+    state_since: r.state_since ?? null,
+    // Computed here rather than in the view so it stays honest against a
+    // cached page render.
+    minutes_in_state: r.state_since
+      ? (now - new Date(r.state_since).getTime()) / 60000
+      : null,
+    last_activity_at: r.last_activity_at ?? null,
+    session_id: r.session_id ?? null,
+    session_type: r.session_type ?? null,
+    mo_number: r.mo_number ?? null,
+    session_started_at: r.session_started_at ?? null,
+    qty_to_make: r.qty_to_make ?? null,
+    qty_made: r.qty_made ?? null,
+    qty_scrapped: r.qty_scrapped ?? null,
+    operator_name: r.operator_name ?? null,
+    operator_role: r.operator_role ?? null,
+    pause_reason_label: r.pause_reason_label ?? null,
+    awaiting_qc_mo: r.awaiting_qc_mo ?? null,
+  }))
+}
