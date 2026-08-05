@@ -3,29 +3,15 @@
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useState, useTransition } from 'react'
 import { Check, RotateCcw } from 'lucide-react'
+import {
+  MACHINE_STATES,
+  STATE_STORAGE_KEY,
+  type MachineState,
+} from '@/lib/reporting/machine-states'
 
-export const MACHINE_STATES = [
-  { key: 'RUNNING',     label: 'Running',     dot: 'bg-status-running',  chip: 'border-status-running/40 bg-status-running/10 text-status-running' },
-  { key: 'IN_SETUP',    label: 'Setup',       dot: 'bg-blue-400',        chip: 'border-blue-400/40 bg-blue-400/10 text-blue-400' },
-  { key: 'UNMANNED',    label: 'Unmanned',    dot: 'bg-purple-400',      chip: 'border-purple-400/40 bg-purple-400/10 text-purple-400' },
-  { key: 'STOPPED',     label: 'Stopped',     dot: 'bg-status-paused',   chip: 'border-status-paused/40 bg-status-paused/10 text-status-paused' },
-  { key: 'AWAITING_QC', label: 'Awaiting QC', dot: 'bg-amber-400',       chip: 'border-amber-400/40 bg-amber-400/10 text-amber-400' },
-  { key: 'IDLE',        label: 'Idle',        dot: 'bg-muted-foreground/50', chip: 'border-border bg-muted text-muted-foreground' },
-] as const
-
-export type MachineState = (typeof MACHINE_STATES)[number]['key']
-
-// Everything except IDLE — "machines being worked on", which is the view
-// you want on the wall.
-export const DEFAULT_STATES: MachineState[] = ['RUNNING', 'IN_SETUP', 'UNMANNED', 'STOPPED', 'AWAITING_QC']
-
-const STORAGE_KEY = 'shoptrack.machineStates'
-
-export function parseStates(raw: string | undefined | null): MachineState[] {
-  if (!raw) return []
-  const valid = new Set(MACHINE_STATES.map(s => s.key as string))
-  return raw.split(',').map(s => s.trim().toUpperCase()).filter(s => valid.has(s)) as MachineState[]
-}
+// NOTE: do not re-export the constants from this file. It is a client
+// component, so anything a server component imports from here comes back as
+// a client reference proxy rather than the real value.
 
 export function MachineStateFilter({
   selected,
@@ -45,7 +31,7 @@ export function MachineStateFilter({
 
   // On first load with no explicit selection, fall back to the saved view.
   useEffect(() => {
-    const stored = typeof window === 'undefined' ? null : window.localStorage.getItem(STORAGE_KEY)
+    const stored = typeof window === 'undefined' ? null : window.localStorage.getItem(STATE_STORAGE_KEY)
     setSavedDefault(stored)
     if (!hasParam && stored) {
       const next = new URLSearchParams(params.toString())
@@ -71,14 +57,14 @@ export function MachineStateFilter({
 
   function saveDefault() {
     const value = selected.join(',')
-    window.localStorage.setItem(STORAGE_KEY, value)
+    window.localStorage.setItem(STATE_STORAGE_KEY, value)
     setSavedDefault(value)
     setJustSaved(true)
     setTimeout(() => setJustSaved(false), 2000)
   }
 
   function clearDefault() {
-    window.localStorage.removeItem(STORAGE_KEY)
+    window.localStorage.removeItem(STATE_STORAGE_KEY)
     setSavedDefault(null)
     const next = new URLSearchParams(params.toString())
     next.delete('state')
