@@ -3,6 +3,8 @@
 import { useState, Fragment } from 'react'
 import Link from 'next/link'
 import { Cpu, User, Clock, Wrench, ChevronDown, ChevronRight, Pause } from 'lucide-react'
+import { LiveDuration } from './LiveDuration'
+import { useElapsedMinutes } from '@/lib/reporting/use-live-now'
 
 type Current = {
   session_type: string
@@ -29,18 +31,12 @@ type SetupRow = {
 }
 
 function fmtDuration(mins: number) {
-  if (mins <= 0) return '0m'
-  const h = Math.floor(mins / 60)
-  const m = mins % 60
+  const total = Math.round(mins)
+  if (total <= 0) return '0m'
+  const h = Math.floor(total / 60)
+  const m = total % 60
   if (h > 0) return `${h}h ${m}m`
   return `${m}m`
-}
-
-function elapsed(startedAt: string) {
-  const ms = Date.now() - new Date(startedAt).getTime()
-  const h = Math.floor(ms / 3600000)
-  const m = Math.floor((ms % 3600000) / 60000)
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
 function fmtDate(dt: string | null) {
@@ -60,7 +56,16 @@ function statusLabel(row: SetupRow): { label: string; cls: string } {
   return { label: 'Idle', cls: 'bg-status-idle/20 text-status-idle' }
 }
 
-export function SetupTimeGrid({ machines }: { machines: SetupRow[] }) {
+export function SetupTimeGrid({
+  machines,
+  dataAsOf,
+}: {
+  machines: SetupRow[]
+  // When the server computed these totals. Anything still in setup has been
+  // accruing since, so the row adds the difference live rather than sitting
+  // frozen until the next refresh.
+  dataAsOf: string
+}) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   if (machines.length === 0) {
@@ -93,11 +98,49 @@ export function SetupTimeGrid({ machines }: { machines: SetupRow[] }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {sorted.map(m => {
-            const { label, cls } = statusLabel(m)
-            const isExpanded = expanded.has(m.id)
-            const hasPauses = m.pause_breakdown.length > 0
-            return (
+          {sorted.map(m => (
+            <SetupRowView
+              key={m.id}
+              m={m}
+              dataAsOf={dataAsOf}
+              isExpanded={expanded.has(m.id)}
+              onToggle={() => toggle(m.id)}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+
+function SetupRowView({
+  m,
+  dataAsOf,
+  isExpanded,
+  onToggle,
+}: {
+  m: SetupRow
+  dataAsOf: string
+  isExpanded: boolean
+  onToggle: () => void
+}) {
+  const { label, cls } = statusLabel(m)
+  const hasPauses = m.pause_breakdown.length > 0
+
+  // Minutes elapsed since the server computed these figures. A machine still
+  // in setup has been accruing that whole time, so add it on — to working
+  // time if the setup is running, to paused time if it is on hold.
+  const sinceQuery = useElapsedMinutes(dataAsOf, 0) ?? 0
+  const running = m.in_setup && m.current?.status !== 'PAUSED'
+  const paused = m.in_setup && m.current?.status === 'PAUSED'
+  const accrued = {
+    total: m.in_setup ? sinceQuery : 0,
+    working: running ? sinceQuery : 0,
+    paused: paused ? sinceQuery : 0,
+  }
+
+  return (
               <Fragment key={m.id}>
                 <tr
                   className={`transition-colors ${m.in_setup ? 'bg-blue-500/5 hover:bg-blue-500/10' : 'bg-card hover:bg-muted/30'}`}
@@ -133,7 +176,8 @@ export function SetupTimeGrid({ machines }: { machines: SetupRow[] }) {
                         <div className="flex items-center gap-3 text-xs text-muted-foreground">
                           <span className="font-mono font-semibold text-foreground">{m.current.mo_number}</span>
                           <span className="flex items-center gap-1 font-mono">
-                            <Clock className="w-3 h-3" />{elapsed(m.current.started_at)}
+                            <Clock className="w-3 h-3" />
+                            <LiveDuration since={m.current.started_at} />
                           </span>
                         </div>
                       </div>
@@ -141,25 +185,29 @@ export function SetupTimeGrid({ machines }: { machines: SetupRow[] }) {
                       <span className="text-muted-foreground">—</span>
                     )}
                   </td>
-                  {/* Total time (incl pauses) */}
+                  {/* Total time (incl pauses) — live while a setup is running */}
                   <td className="px-4 py-3">
-                    <span className="font-mono font-semibold text-foreground">{fmtDuration(m.total_setup_minutes)}</span>
+                    <span className="font-mono font-semibold text-foreground tabular-nums" suppressHydrationWarning>
+                      {fmtDuration(m.total_setup_minutes + accrued.total)}
+                    </span>
                   </td>
                   {/* Working time (pauses excluded) */}
                   <td className="px-4 py-3">
-                    <span className="font-mono font-semibold text-status-running">{fmtDuration(m.net_setup_minutes)}</span>
+                    <span className="font-mono font-semibold text-status-running tabular-nums" suppressHydrationWarning>
+                      {fmtDuration(m.net_setup_minutes + accrued.working)}
+                    </span>
                   </td>
                   {/* Paused — click to drill into reasons */}
                   <td className="px-4 py-3">
                     {hasPauses ? (
                       <button
-                        onClick={() => toggle(m.id)}
+                        onClick={onToggle}
                         className="flex items-center gap-1.5 font-mono font-semibold text-status-paused hover:underline"
                         aria-expanded={isExpanded}
                         aria-label={`Show pause reasons for ${m.machine_code}`}
                       >
                         {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                        {fmtDuration(m.paused_setup_minutes)}
+                        <span suppressHydrationWarning>{fmtDuration(m.paused_setup_minutes + accrued.paused)}</span>
                       </button>
                     ) : (
                       <span className="font-mono text-muted-foreground">0m</span>
@@ -200,10 +248,6 @@ export function SetupTimeGrid({ machines }: { machines: SetupRow[] }) {
                   </tr>
                 )}
               </Fragment>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+            
   )
 }
