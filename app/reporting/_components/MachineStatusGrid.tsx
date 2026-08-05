@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { Cpu, User, Clock, ShieldQuestion } from 'lucide-react'
-import { MACHINE_STATES, type MachineState } from './MachineStateFilter'
+import { stateMeta, type MachineState } from '@/lib/reporting/machine-states'
 
 export type MachineRow = {
   machine_id: string
@@ -23,10 +23,6 @@ export type MachineRow = {
   operator_role: string | null
   pause_reason_label: string | null
   awaiting_qc_mo: string | null
-}
-
-function stateMeta(state: MachineState) {
-  return MACHINE_STATES.find(s => s.key === state) ?? MACHINE_STATES[MACHINE_STATES.length - 1]
 }
 
 function duration(mins: number | null) {
