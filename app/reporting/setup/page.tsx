@@ -19,6 +19,9 @@ function fmtHours(mins: number) {
 export default async function SetupTimeReportPage({ searchParams }: PageProps) {
   const range = resolveRange(await searchParams)
   const machines = await getSetupTimeReport(range)
+  // Stamped after the query so the client knows how long these totals have
+  // been sitting still, and can keep any in-progress setup ticking.
+  const dataAsOf = new Date().toISOString()
 
   const inSetupNow = machines.filter(m => m.in_setup).length
   const totalSetupMinutes = machines.reduce((s, m) => s + m.total_setup_minutes, 0)
@@ -101,7 +104,7 @@ export default async function SetupTimeReportPage({ searchParams }: PageProps) {
           </div>
         </div>
 
-        <SetupTimeGrid machines={machines as any} />
+        <SetupTimeGrid machines={machines as any} dataAsOf={dataAsOf} />
       </div>
     </ReportingShell>
   )
