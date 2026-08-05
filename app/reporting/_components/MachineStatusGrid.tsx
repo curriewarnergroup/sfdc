@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { Cpu, User, Clock, ShieldQuestion } from 'lucide-react'
 import { stateMeta, type MachineState } from '@/lib/reporting/machine-states'
+import { useElapsedMinutes, formatDuration } from '@/lib/reporting/use-live-now'
 
 export type MachineRow = {
   machine_id: string
@@ -23,13 +24,6 @@ export type MachineRow = {
   operator_role: string | null
   pause_reason_label: string | null
   awaiting_qc_mo: string | null
-}
-
-function duration(mins: number | null) {
-  if (mins == null) return '—'
-  const m = Math.max(0, Math.round(mins))
-  const h = Math.floor(m / 60)
-  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
 // A stoppage gets louder the longer it runs. Nothing escalates for running
@@ -87,13 +81,26 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {machines.map(m => {
-            const meta = stateMeta(m.state)
-            const jobMinutes = m.session_started_at
-              ? (Date.now() - new Date(m.session_started_at).getTime()) / 60000
-              : null
-            return (
-              <tr key={m.machine_id} className="bg-card hover:bg-muted/30 transition-colors">
+          {machines.map(m => (
+            <MachineStatusRow key={m.machine_id} m={m} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function MachineStatusRow({ m }: { m: MachineRow }) {
+  const meta = stateMeta(m.state)
+
+  // Both timers tick live. State time is what the row is sorted by and what
+  // escalates in colour; job time is total elapsed on the current session.
+  const stateMinutes = useElapsedMinutes(m.state_since, m.minutes_in_state)
+  const jobMinutes = useElapsedMinutes(m.session_started_at, null)
+
+  return (
+            <>
+              <tr className="bg-card hover:bg-muted/30 transition-colors">
                 {/* Machine */}
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
@@ -128,9 +135,9 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
                   </div>
                 </td>
 
-                {/* Time in current state */}
-                <td className={`px-4 py-3 font-mono ${durationTone(m.state, m.minutes_in_state)}`}>
-                  {duration(m.minutes_in_state)}
+                {/* Time in current state — counts up while you watch */}
+                <td className={`px-4 py-3 font-mono tabular-nums ${durationTone(m.state, stateMinutes)}`}>
+                  <span suppressHydrationWarning>{formatDuration(stateMinutes)}</span>
                 </td>
 
                 {/* Operator */}
@@ -161,10 +168,10 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
 
                 {/* Total time on the job, distinct from time in state */}
                 <td className="px-4 py-3">
-                  {jobMinutes != null ? (
-                    <div className="flex items-center gap-1.5 text-muted-foreground font-mono">
+                  {m.session_started_at ? (
+                    <div className="flex items-center gap-1.5 text-muted-foreground font-mono tabular-nums">
                       <Clock className="w-3.5 h-3.5" />
-                      {duration(jobMinutes)}
+                      <span suppressHydrationWarning>{formatDuration(jobMinutes, false)}</span>
                     </div>
                   ) : (
                     <span className="text-muted-foreground">—</span>
@@ -190,10 +197,6 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
                   </Link>
                 </td>
               </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+            </>
   )
 }
