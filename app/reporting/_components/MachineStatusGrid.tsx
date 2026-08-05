@@ -1,41 +1,53 @@
 'use client'
 
 import Link from 'next/link'
-import { Cpu, User, Clock } from 'lucide-react'
+import { Cpu, User, Clock, ShieldQuestion } from 'lucide-react'
+import { MACHINE_STATES, type MachineState } from './MachineStateFilter'
 
-type Session = {
-  id: string
-  session_type: string
-  status: string
-  mo_number: string
-  started_at: string
+export type MachineRow = {
+  machine_id: string
+  machine_code: string
+  description: string | null
+  state: MachineState
+  state_since: string | null
+  minutes_in_state: number | null
+  last_activity_at: string | null
+  session_id: string | null
+  session_type: string | null
+  mo_number: string | null
+  session_started_at: string | null
   qty_to_make: number | null
   qty_made: number | null
   qty_scrapped: number | null
-  user: { display_name: string; role: string } | null
+  operator_name: string | null
+  operator_role: string | null
   pause_reason_label: string | null
+  awaiting_qc_mo: string | null
 }
 
-type MachineRow = {
-  id: string
-  machine_code: string
-  description: string | null
-  is_active: boolean
-  session: Session | null
+function stateMeta(state: MachineState) {
+  return MACHINE_STATES.find(s => s.key === state) ?? MACHINE_STATES[MACHINE_STATES.length - 1]
 }
 
-function statusLabel(session: Session | null): { label: string; cls: string } {
-  if (!session) return { label: 'Idle', cls: 'bg-status-idle/20 text-status-idle' }
-  if (session.status === 'PAUSED') return { label: 'Paused', cls: 'bg-status-paused/20 text-status-paused' }
-  if (session.session_type === 'SETUP') return { label: 'Setup', cls: 'bg-blue-500/20 text-blue-400' }
-  return { label: 'Running', cls: 'bg-status-running/20 text-status-running' }
+function duration(mins: number | null) {
+  if (mins == null) return '—'
+  const m = Math.max(0, Math.round(mins))
+  const h = Math.floor(m / 60)
+  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
-function elapsed(startedAt: string) {
-  const ms = Date.now() - new Date(startedAt).getTime()
-  const h = Math.floor(ms / 3600000)
-  const m = Math.floor((ms % 3600000) / 60000)
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
+// A stoppage gets louder the longer it runs. Nothing escalates for running
+// machines — a long cycle is not a problem, and colouring it like one is
+// how a dashboard trains people to ignore it.
+function durationTone(state: MachineState, mins: number | null) {
+  if (mins == null) return 'text-muted-foreground'
+  if (state === 'STOPPED') {
+    if (mins >= 120) return 'text-destructive font-semibold'
+    if (mins >= 30) return 'text-status-paused font-semibold'
+    return 'text-status-paused'
+  }
+  if (state === 'AWAITING_QC' && mins >= 20) return 'text-amber-400 font-semibold'
+  return 'text-foreground'
 }
 
 function QtyBar({ made, total, scrapped }: { made: number | null; total: number | null; scrapped?: number | null }) {
@@ -59,7 +71,11 @@ function QtyBar({ made, total, scrapped }: { made: number | null; total: number 
 
 export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
   if (machines.length === 0) {
-    return <p className="text-center text-muted-foreground py-16">No machines found.</p>
+    return (
+      <p className="text-center text-muted-foreground py-16">
+        No machines match the selected states.
+      </p>
+    )
   }
 
   return (
@@ -67,16 +83,21 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
       <table className="w-full text-sm">
         <thead className="bg-muted/50 border-b border-border">
           <tr>
-            {['Machine', 'Status', 'Operator', 'MO Number', 'Elapsed', 'Progress', ''].map(h => (
-              <th key={h} className="text-left text-xs font-semibold uppercase tracking-widest text-muted-foreground px-4 py-3">{h}</th>
+            {['Machine', 'State', 'For', 'Operator', 'MO Number', 'On Job', 'Progress', ''].map(h => (
+              <th key={h} className="text-left text-xs font-semibold uppercase tracking-widest text-muted-foreground px-4 py-3">
+                {h}
+              </th>
             ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
           {machines.map(m => {
-            const { label, cls } = statusLabel(m.session)
+            const meta = stateMeta(m.state)
+            const jobMinutes = m.session_started_at
+              ? (Date.now() - new Date(m.session_started_at).getTime()) / 60000
+              : null
             return (
-              <tr key={m.id} className="bg-card hover:bg-muted/30 transition-colors">
+              <tr key={m.machine_id} className="bg-card hover:bg-muted/30 transition-colors">
                 {/* Machine */}
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
@@ -89,51 +110,84 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
                     </div>
                   </div>
                 </td>
-                {/* Status */}
+
+                {/* State */}
                 <td className="px-4 py-3">
                   <div className="flex flex-col gap-1">
-                    <span className={`text-[11px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded w-fit ${cls}`}>
-                      {label}
+                    <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded border w-fit ${meta.chip}`}>
+                      <span className={`w-1.5 h-1.5 rounded-full ${meta.dot}`} />
+                      {meta.label}
                     </span>
-                    {m.session?.status === 'PAUSED' && m.session.pause_reason_label && (
-                      <span className="text-[11px] text-muted-foreground truncate max-w-[140px]">
-                        {m.session.pause_reason_label}
+                    {m.state === 'STOPPED' && m.pause_reason_label && (
+                      <span className="text-[11px] text-muted-foreground truncate max-w-[150px]">
+                        {m.pause_reason_label}
+                      </span>
+                    )}
+                    {m.state === 'AWAITING_QC' && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <ShieldQuestion className="w-3 h-3" />
+                        First-off outstanding
                       </span>
                     )}
                   </div>
                 </td>
+
+                {/* Time in current state */}
+                <td className={`px-4 py-3 font-mono ${durationTone(m.state, m.minutes_in_state)}`}>
+                  {duration(m.minutes_in_state)}
+                </td>
+
                 {/* Operator */}
                 <td className="px-4 py-3">
-                  {m.session ? (
+                  {m.operator_name ? (
                     <div className="flex items-center gap-1.5">
                       <User className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      <span className="text-foreground">{m.session.user?.display_name ?? 'Unknown'}</span>
-                      <span className="text-xs text-muted-foreground">({m.session.user?.role})</span>
+                      <span className="text-foreground">{m.operator_name}</span>
+                      {m.operator_role && (
+                        <span className="text-xs text-muted-foreground">({m.operator_role})</span>
+                      )}
                     </div>
-                  ) : <span className="text-muted-foreground">—</span>}
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                 </td>
-                {/* MO Number */}
+
+                {/* MO */}
                 <td className="px-4 py-3">
-                  {m.session
-                    ? <span className="font-mono font-semibold text-foreground">{m.session.mo_number}</span>
-                    : <span className="text-muted-foreground">—</span>}
+                  {m.mo_number || m.awaiting_qc_mo ? (
+                    <span className="font-mono font-semibold text-foreground">
+                      {m.mo_number ?? m.awaiting_qc_mo}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                 </td>
-                {/* Elapsed */}
+
+                {/* Total time on the job, distinct from time in state */}
                 <td className="px-4 py-3">
-                  {m.session
-                    ? <div className="flex items-center gap-1.5 text-foreground font-mono"><Clock className="w-3.5 h-3.5 text-muted-foreground" />{elapsed(m.session.started_at)}</div>
-                    : <span className="text-muted-foreground">—</span>}
+                  {jobMinutes != null ? (
+                    <div className="flex items-center gap-1.5 text-muted-foreground font-mono">
+                      <Clock className="w-3.5 h-3.5" />
+                      {duration(jobMinutes)}
+                    </div>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                 </td>
+
                 {/* Progress */}
                 <td className="px-4 py-3 min-w-[140px]">
-                  {m.session
-                    ? <QtyBar made={m.session.qty_made} total={m.session.qty_to_make} scrapped={m.session.qty_scrapped} />
-                    : <span className="text-muted-foreground text-xs">—</span>}
+                  {m.session_id ? (
+                    <QtyBar made={m.qty_made} total={m.qty_to_make} scrapped={m.qty_scrapped} />
+                  ) : (
+                    <span className="text-muted-foreground text-xs">—</span>
+                  )}
                 </td>
+
                 {/* Link */}
                 <td className="px-4 py-3">
                   <Link
-                    href={`/reporting/machines/${m.id}`}
+                    href={`/reporting/machines/${m.machine_id}`}
                     className="text-xs font-semibold text-primary hover:underline whitespace-nowrap"
                   >
                     View history
