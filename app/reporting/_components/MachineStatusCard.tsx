@@ -1,6 +1,7 @@
 'use client'
 
 import { Cpu, User, Clock, Shield, Tag, Hash, AlertTriangle } from 'lucide-react'
+import { LiveDuration } from './LiveDuration'
 
 type LiveSession = {
   id: string
@@ -23,13 +24,6 @@ type Machine = {
   description: string | null
   is_active: boolean
   unmanned_threshold_minutes?: number | null
-}
-
-function elapsed(startedAt: string) {
-  const ms = Date.now() - new Date(startedAt).getTime()
-  const h = Math.floor(ms / 3600000)
-  const m = Math.floor((ms % 3600000) / 60000)
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
 function StatusPill({ session }: { session: LiveSession | null }) {
@@ -173,7 +167,7 @@ export function MachineStatusCard({
           <Stat
             icon={<Clock className="w-3.5 h-3.5 shrink-0" />}
             label="Uptime"
-            value={elapsed(session.started_at)}
+            value={<LiveDuration since={session.started_at} />}
             mono
           />
 
