@@ -30,3 +30,8 @@ CREATE UNIQUE INDEX idx_sessions_one_active_per_machine
 -- 4. Allow setters / operators to be signed onto multiple jobs at once
 --    (everywhere, no cap). Drop the single-active-session-per-user rule.
 DROP INDEX IF EXISTS idx_sessions_one_active_per_user;
+
+-- 5. Tell PostgREST (the REST API) to reload its schema cache immediately, so
+--    the new columns are visible without waiting or restarting. This clears the
+--    "Could not find the 'is_multi_setup' column ... in the schema cache" error.
+NOTIFY pgrst, 'reload schema';
