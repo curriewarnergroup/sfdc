@@ -1,19 +1,13 @@
-import { getDashboardStats, autoCloseSession } from '@/lib/actions/admin'
+import { getDashboardStats } from '@/lib/actions/admin'
 import { AdminShell, PageHeader, StatCard, StatusBadge } from './_components/AdminShell'
+import { ForceCloseButton } from './_components/ForceCloseButton'
 import { elapsedStr } from './_components/admin-utils'
 import { AlertTriangle } from 'lucide-react'
-import { revalidatePath } from 'next/cache'
 
 export const dynamic = 'force-dynamic'
 
 export default async function AdminDashboardPage() {
   const { activeSessions, longRunning, pausedSessions, unmannedSessions, recentAudit } = await getDashboardStats()
-
-  async function handleForceClose(sessionId: string) {
-    'use server'
-    await autoCloseSession(sessionId)
-    revalidatePath('/admin')
-  }
 
   return (
     <AdminShell>
@@ -99,11 +93,7 @@ export default async function AdminDashboardPage() {
                           {elapsedStr(s.started_at)}
                         </td>
                         <td className="px-4 py-3">
-                          <form action={handleForceClose.bind(null, s.id)}>
-                            <button type="submit" className="text-xs text-destructive hover:underline font-medium">
-                              Force Close
-                            </button>
-                          </form>
+                          <ForceCloseButton sessionId={s.id} contextLabel={s.mo_number ?? undefined} />
                         </td>
                       </tr>
                     )

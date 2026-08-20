@@ -2,9 +2,9 @@
 
 import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
-import { autoCloseSession } from '@/lib/actions/admin'
 import { adminPauseSession, adminResumeSession } from '@/lib/actions/sessions'
 import { StatusBadge } from '../_components/AdminShell'
+import { ForceCloseButton } from '../_components/ForceCloseButton'
 import { elapsedStr } from '../_components/admin-utils'
 import { Search, Download } from 'lucide-react'
 
@@ -45,11 +45,6 @@ export function SessionsClient({ sessions, pauseReasons }: { sessions: Session[]
       (s.machine?.machine_code ?? '').toLowerCase().includes(q)
     return matchStatus && matchType && matchSearch
   })
-
-  function handleForceClose(id: string) {
-    if (!confirm('Force-close this session?')) return
-    startTransition(async () => { await autoCloseSession(id); router.refresh() })
-  }
 
   function handlePauseConfirm() {
     if (!pauseTarget || !selectedReasonId) { setPauseError('Please select a pause reason.'); return }
@@ -164,10 +159,11 @@ export function SessionsClient({ sessions, pauseReasons }: { sessions: Session[]
                             Resume
                           </button>
                         )}
-                        <button onClick={() => handleForceClose(s.id)} disabled={pending}
-                          className="text-xs text-destructive hover:underline font-medium disabled:opacity-40">
-                          Force Close
-                        </button>
+                        <ForceCloseButton
+                          sessionId={s.id}
+                          contextLabel={s.mo_number ?? undefined}
+                          className="text-xs text-destructive hover:underline font-medium disabled:opacity-40"
+                        />
                       </div>
                     )}
                   </td>
