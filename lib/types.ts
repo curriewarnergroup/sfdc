@@ -47,6 +47,8 @@ export interface Machine {
   machine_code: string
   description: string | null
   is_active: boolean
+  // When true, this machine may hold multiple concurrent setups / runs at once.
+  is_multi_setup: boolean
 }
 
 export interface PauseReason {
@@ -84,6 +86,8 @@ export interface Session {
   qty_made: number | null
   qty_scrapped: number | null
   authorised_by: string | null
+  // Denormalised copy of the machine's is_multi_setup flag at start time.
+  allow_multi: boolean
   created_at: string
   // joined
   machine?: Machine

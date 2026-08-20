@@ -938,11 +938,16 @@ export async function getAllMachines() {
   return data ?? []
 }
 
-export async function createMachine(params: { machineCode: string; description: string }): Promise<ActionResult> {
+export async function createMachine(params: {
+  machineCode: string
+  description: string
+  isMultiSetup?: boolean
+}): Promise<ActionResult> {
   const supabase = createServiceClient()
   const { error } = await supabase.from('machines').insert({
     machine_code: params.machineCode.trim().toUpperCase(),
     description: params.description.trim() || null,
+    is_multi_setup: params.isMultiSetup ?? false,
   })
   if (error) return { ok: false, error: error.message }
   return { ok: true }
@@ -953,6 +958,7 @@ export async function updateMachine(params: {
   machineCode: string
   description?: string
   isActive: boolean
+  isMultiSetup?: boolean
 }): Promise<ActionResult> {
   const supabase = createServiceClient()
   const { error } = await supabase
@@ -961,9 +967,19 @@ export async function updateMachine(params: {
       machine_code: params.machineCode.trim().toUpperCase(),
       description: params.description?.trim() ?? null,
       is_active: params.isActive,
+      is_multi_setup: params.isMultiSetup ?? false,
     })
     .eq('id', params.id)
   if (error) return { ok: false, error: error.message }
+
+  // Keep the denormalised flag on any live sessions for this machine in sync,
+  // so newly-toggled multi machines relax (or re-tighten) occupancy correctly.
+  await supabase
+    .from('sessions')
+    .update({ allow_multi: params.isMultiSetup ?? false })
+    .eq('machine_id', params.id)
+    .in('status', ['ACTIVE', 'PAUSED'])
+
   return { ok: true }
 }
 
