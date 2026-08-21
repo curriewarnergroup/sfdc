@@ -93,7 +93,7 @@ export async function startSession(params: {
   // Check machine is active
   const { data: machine } = await supabase
     .from('machines')
-    .select('is_active, machine_code')
+    .select('is_active, machine_code, is_multi_setup')
     .eq('id', params.machineId)
     .single()
 
@@ -101,18 +101,44 @@ export async function startSession(params: {
     return { ok: false, error: `Machine ${machine?.machine_code ?? ''} is inactive and cannot be used.` }
   }
 
-  // Check machine not already occupied
-  const { data: machineSession } = await supabase
-    .from('sessions')
-    .select('id, mo_number')
-    .eq('machine_id', params.machineId)
-    .in('status', ['ACTIVE', 'PAUSED'])
-    .single()
+  const allowMulti = !!machine.is_multi_setup
 
-  if (machineSession) {
-    return {
-      ok: false,
-      error: `Machine already has an active session on MO ${machineSession.mo_number}.`,
+  if (allowMulti) {
+    // Multi-setup machine: several jobs may run at once. We only block an exact
+    // duplicate — the same MO already live as the same session type on this
+    // machine — so time isn't double-tracked against one job.
+    const moNumber = params.moNumber.trim().toUpperCase()
+    const { data: dupSession } = await supabase
+      .from('sessions')
+      .select('id')
+      .eq('machine_id', params.machineId)
+      .eq('mo_number', moNumber)
+      .eq('session_type', params.sessionType)
+      .in('status', ['ACTIVE', 'PAUSED'])
+      .limit(1)
+      .maybeSingle()
+
+    if (dupSession) {
+      return {
+        ok: false,
+        error: `MO ${moNumber} already has a live ${params.sessionType.toLowerCase()} on this machine.`,
+      }
+    }
+  } else {
+    // Single-setup machine: enforce one active session at a time.
+    const { data: machineSession } = await supabase
+      .from('sessions')
+      .select('id, mo_number')
+      .eq('machine_id', params.machineId)
+      .in('status', ['ACTIVE', 'PAUSED'])
+      .limit(1)
+      .maybeSingle()
+
+    if (machineSession) {
+      return {
+        ok: false,
+        error: `Machine already has an active session on MO ${machineSession.mo_number}.`,
+      }
     }
   }
 
@@ -158,6 +184,7 @@ export async function startSession(params: {
       machine_id: params.machineId,
       user_id: user.id,
       device_id: params.deviceId,
+      allow_multi: allowMulti,
       ...(firstOffOverrideBy ? { authorised_by: firstOffOverrideBy.id } : {}),
     })
     .select('*, machine:machines(*), user:shopfloor_users!user_id(*), device:devices(*)')
@@ -205,7 +232,7 @@ export async function authoriseUnmannedRun(params: {
   // Check machine is active
   const { data: unmannedMachine } = await supabase
     .from('machines')
-    .select('is_active, machine_code')
+    .select('is_active, machine_code, is_multi_setup')
     .eq('id', params.machineId)
     .single()
 
@@ -213,12 +240,25 @@ export async function authoriseUnmannedRun(params: {
     return { ok: false, error: `Machine ${unmannedMachine?.machine_code ?? ''} is inactive and cannot be used.` }
   }
 
-  // Check if machine already has an active session — if so, convert it to UNMANNED (state change, not new session)
-  const { data: existing } = await supabase
+  const unmannedAllowMulti = !!unmannedMachine.is_multi_setup
+
+  // Check if machine already has an active session — if so, convert it to
+  // UNMANNED (state change, not new session). On multi-setup machines several
+  // may be live, so match the specific MO when one is supplied, else take the
+  // most recent.
+  let existingQuery = supabase
     .from('sessions')
     .select('id, mo_number, session_type')
     .eq('machine_id', params.machineId)
     .in('status', ['ACTIVE', 'PAUSED'])
+
+  if (unmannedAllowMulti && params.moNumber?.trim()) {
+    existingQuery = existingQuery.eq('mo_number', params.moNumber.trim().toUpperCase())
+  }
+
+  const { data: existing } = await existingQuery
+    .order('started_at', { ascending: false })
+    .limit(1)
     .maybeSingle()
 
   let session: any
@@ -261,6 +301,7 @@ export async function authoriseUnmannedRun(params: {
         user_id: supervisor.id,
         device_id: params.deviceId,
         authorised_by: supervisor.id,
+        allow_multi: unmannedAllowMulti,
       })
       .select('*, machine:machines(*), user:shopfloor_users!user_id(*), device:devices(*)')
       .single()
@@ -397,10 +438,6 @@ export async function resumeSession(params: {
     .eq('status', 'PAUSED')
 
   if (error) {
-    // Unique index blocks a user from holding two live sessions at once.
-    if (error.code === '23505') {
-      return { ok: false, error: 'You already have another active job. Finish it before signing on here.' }
-    }
     return { ok: false, error: 'Could not resume session.' }
   }
 

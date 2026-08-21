@@ -209,6 +209,78 @@ export async function autoCloseSession(sessionId: string): Promise<ActionResult>
   return { ok: true }
 }
 
+// Reason an admin gives when force-closing a session.
+//   ERROR          → session was a mistake; discard it entirely (keep no time).
+//   JOB_FINISHED   → job is genuinely done; keep time up to now, mark finished.
+//   OTHER_PRIORITY → another job must take over; keep time up to now, finish this one.
+export type ForceCloseReason = 'ERROR' | 'JOB_FINISHED' | 'OTHER_PRIORITY'
+
+export async function forceCloseSession(
+  sessionId: string,
+  reason: ForceCloseReason,
+): Promise<ActionResult> {
+  const supabase = createServiceClient()
+
+  if (reason === 'ERROR') {
+    // Discard the session completely. session_events cascade-delete and
+    // check_results are set null via their FKs. Record a system audit entry
+    // first (the session's own events are about to be removed).
+    const { data: sess } = await supabase
+      .from('sessions')
+      .select('mo_number, machine_id, device_id, session_type')
+      .eq('id', sessionId)
+      .maybeSingle()
+
+    const { error } = await supabase.from('sessions').delete().eq('id', sessionId)
+    if (error) return { ok: false, error: error.message }
+
+    await supabase.from('audit_log').insert({
+      event_type: 'SESSION_AUTO_CLOSE',
+      device_id: sess?.device_id ?? null,
+      metadata: {
+        forced: true,
+        reason: 'ERROR',
+        discarded: true,
+        mo_number: sess?.mo_number ?? null,
+        session_type: sess?.session_type ?? null,
+      },
+    })
+
+    return { ok: true }
+  }
+
+  // Keep-data closures: stamp the end time exactly now and mark the job
+  // finished so it stops showing as active. All tallied time is preserved.
+  const note =
+    reason === 'JOB_FINISHED'
+      ? 'Force-closed by admin — job finished'
+      : 'Force-closed by admin — other job took priority'
+
+  const { data: updated, error } = await supabase
+    .from('sessions')
+    .update({
+      status: 'FINISHED',
+      ended_at: new Date().toISOString(),
+      auto_closed: true,
+      notes: note,
+    })
+    .eq('id', sessionId)
+    .in('status', ['ACTIVE', 'PAUSED'])
+    .select('id')
+    .maybeSingle()
+
+  if (error) return { ok: false, error: error.message }
+  if (!updated) return { ok: false, error: 'Session is no longer active.' }
+
+  await supabase.from('session_events').insert({
+    session_id: sessionId,
+    event_type: 'SESSION_AUTO_CLOSE',
+    metadata: { forced: true, reason },
+  })
+
+  return { ok: true }
+}
+
 // ---- Devices ----
 
 export async function getAllDevices() {
@@ -938,11 +1010,16 @@ export async function getAllMachines() {
   return data ?? []
 }
 
-export async function createMachine(params: { machineCode: string; description: string }): Promise<ActionResult> {
+export async function createMachine(params: {
+  machineCode: string
+  description: string
+  isMultiSetup?: boolean
+}): Promise<ActionResult> {
   const supabase = createServiceClient()
   const { error } = await supabase.from('machines').insert({
     machine_code: params.machineCode.trim().toUpperCase(),
     description: params.description.trim() || null,
+    is_multi_setup: params.isMultiSetup ?? false,
   })
   if (error) return { ok: false, error: error.message }
   return { ok: true }
@@ -953,6 +1030,7 @@ export async function updateMachine(params: {
   machineCode: string
   description?: string
   isActive: boolean
+  isMultiSetup?: boolean
 }): Promise<ActionResult> {
   const supabase = createServiceClient()
   const { error } = await supabase
@@ -961,9 +1039,19 @@ export async function updateMachine(params: {
       machine_code: params.machineCode.trim().toUpperCase(),
       description: params.description?.trim() ?? null,
       is_active: params.isActive,
+      is_multi_setup: params.isMultiSetup ?? false,
     })
     .eq('id', params.id)
   if (error) return { ok: false, error: error.message }
+
+  // Keep the denormalised flag on any live sessions for this machine in sync,
+  // so newly-toggled multi machines relax (or re-tighten) occupancy correctly.
+  await supabase
+    .from('sessions')
+    .update({ allow_multi: params.isMultiSetup ?? false })
+    .eq('machine_id', params.id)
+    .in('status', ['ACTIVE', 'PAUSED'])
+
   return { ok: true }
 }
 

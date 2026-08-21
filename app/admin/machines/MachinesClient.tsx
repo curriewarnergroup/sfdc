@@ -6,7 +6,7 @@ import { createMachine, updateMachine, deleteMachine } from '@/lib/actions/admin
 import { CrudModal, FormField, inputCls, ModalFooter } from '../_components/CrudModal'
 import { Plus, Pencil, Trash2, Search } from 'lucide-react'
 
-type Machine = { id: string; machine_code: string; description?: string | null; is_active: boolean }
+type Machine = { id: string; machine_code: string; description?: string | null; is_active: boolean; is_multi_setup?: boolean }
 
 export function MachinesClient({ machines }: { machines: Machine[] }) {
   const router = useRouter()
@@ -18,15 +18,17 @@ export function MachinesClient({ machines }: { machines: Machine[] }) {
   const [addOpen, setAddOpen] = useState(false)
   const [addCode, setAddCode] = useState('')
   const [addDesc, setAddDesc] = useState('')
+  const [addMulti, setAddMulti] = useState(false)
 
   // Edit
   const [editM, setEditM] = useState<Machine | null>(null)
   const [editCode, setEditCode] = useState('')
   const [editDesc, setEditDesc] = useState('')
   const [editActive, setEditActive] = useState(true)
+  const [editMulti, setEditMulti] = useState(false)
 
   function openEdit(m: Machine) {
-    setEditM(m); setEditCode(m.machine_code); setEditDesc(m.description ?? ''); setEditActive(m.is_active); setError('')
+    setEditM(m); setEditCode(m.machine_code); setEditDesc(m.description ?? ''); setEditActive(m.is_active); setEditMulti(!!m.is_multi_setup); setError('')
   }
 
   const naturalSort = (a: Machine, b: Machine) =>
@@ -44,16 +46,16 @@ export function MachinesClient({ machines }: { machines: Machine[] }) {
   function handleAdd(e: React.FormEvent) {
     e.preventDefault(); setError('')
     startTransition(async () => {
-      const res = await createMachine({ machineCode: addCode, description: addDesc })
+      const res = await createMachine({ machineCode: addCode, description: addDesc, isMultiSetup: addMulti })
       if (!res.ok) { setError(res.error ?? 'Failed'); return }
-      setAddOpen(false); setAddCode(''); setAddDesc(''); router.refresh()
+      setAddOpen(false); setAddCode(''); setAddDesc(''); setAddMulti(false); router.refresh()
     })
   }
 
   function handleEdit(e: React.FormEvent) {
     e.preventDefault(); if (!editM) return; setError('')
     startTransition(async () => {
-      const res = await updateMachine({ id: editM.id, machineCode: editCode, description: editDesc, isActive: editActive })
+      const res = await updateMachine({ id: editM.id, machineCode: editCode, description: editDesc, isActive: editActive, isMultiSetup: editMulti })
       if (!res.ok) { setError(res.error ?? 'Failed'); return }
       setEditM(null); router.refresh()
     })
@@ -79,7 +81,7 @@ export function MachinesClient({ machines }: { machines: Machine[] }) {
   }
 
   function handleCsvExport() {
-    const rows = [['Machine Code', 'Description', 'Active'], ...machines.map(m => [m.machine_code, m.description ?? '', m.is_active ? 'Yes' : 'No'])]
+    const rows = [['Machine Code', 'Description', 'Active', 'Multi-Setup'], ...machines.map(m => [m.machine_code, m.description ?? '', m.is_active ? 'Yes' : 'No', m.is_multi_setup ? 'Yes' : 'No'])]
     const csv = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'machines.csv'; a.click()
@@ -110,7 +112,14 @@ export function MachinesClient({ machines }: { machines: Machine[] }) {
           <tbody className="divide-y divide-border">
             {activeMachines.map(m => (
               <tr key={m.id} className="bg-card hover:bg-muted/30 transition-colors">
-                <td className="px-4 py-3 font-mono font-semibold text-foreground">{m.machine_code}</td>
+                <td className="px-4 py-3 font-mono font-semibold text-foreground">
+                  <span className="inline-flex items-center gap-2">
+                    {m.machine_code}
+                    {m.is_multi_setup && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary">Multi</span>
+                    )}
+                  </span>
+                </td>
                 <td className="px-4 py-3 text-muted-foreground w-full">{m.description ?? '—'}</td>
                 <td className="px-4 py-3">
                   <div className="flex gap-2 justify-end">
@@ -168,6 +177,7 @@ export function MachinesClient({ machines }: { machines: Machine[] }) {
         <form onSubmit={handleAdd} className="space-y-4">
           <FormField label="Machine Code"><input value={addCode} onChange={e => setAddCode(e.target.value.toUpperCase())} required className={inputCls} placeholder="M003" /></FormField>
           <FormField label="Description"><input value={addDesc} onChange={e => setAddDesc(e.target.value)} className={inputCls} placeholder="CNC Lathe — Bay 3" /></FormField>
+          <MultiSetupToggle checked={addMulti} onChange={setAddMulti} />
           {error && <p className="text-xs text-destructive">{error}</p>}
           <ModalFooter onClose={() => setAddOpen(false)} pending={pending} submitLabel="Add Machine" />
         </form>
@@ -204,10 +214,30 @@ export function MachinesClient({ machines }: { machines: Machine[] }) {
               <option value="inactive">Inactive</option>
             </select>
           </FormField>
+          <MultiSetupToggle checked={editMulti} onChange={setEditMulti} />
           {error && <p className="text-xs text-destructive">{error}</p>}
           <ModalFooter onClose={() => setEditM(null)} pending={pending} />
         </form>
       </CrudModal>
     </div>
+  )
+}
+
+function MultiSetupToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="flex items-start gap-3 rounded-lg border border-border bg-muted/20 px-3 py-3 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={e => onChange(e.target.checked)}
+        className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-primary"
+      />
+      <span className="flex flex-col gap-0.5">
+        <span className="text-sm font-semibold text-foreground">Multi-setup machine</span>
+        <span className="text-xs text-muted-foreground">
+          Allow several setups / runs to be tracked on this machine at the same time.
+        </span>
+      </span>
+    </label>
   )
 }

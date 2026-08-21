@@ -228,6 +228,85 @@ function btnClass(state: MachineState, role: 'start' | 'pause'): string {
     : 'bg-red-800 text-white border-white/50 hover:bg-red-900'
 }
 
+// ---- Multi-setup actions body ----
+// For machines flagged as multi-setup: start buttons stay permanently visible
+// so several setups / runs can be added, and every live job on the machine is
+// listed below with its own timer. Tapping a job opens the manage flow to
+// pause / resume / finish it. First-off / override and per-session time
+// tallying are unchanged — each job is tracked independently.
+function MultiActionsBody({
+  machineState,
+  sessions,
+  onAction,
+}: {
+  machineState: MachineState
+  sessions: Session[]
+  onAction: (s: Session) => void
+}) {
+  const router = useRouter()
+  const onColor = machineState !== 'idle'
+  const headingCls = onColor ? 'text-white/80' : 'text-muted-foreground'
+
+  return (
+    <div className="flex-1 flex flex-col gap-6 px-6 pb-8">
+      {/* Permanent start actions */}
+      <div className="w-full max-w-xl mx-auto grid grid-cols-2 gap-4" role="group" aria-label="Start a new job">
+        <BigButton
+          variant="success"
+          icon={<SetupStartIcon />}
+          sublabel="Scan operator & MO"
+          onClick={() => router.push('/kiosk/setup/start')}
+          aria-label="Setup Start"
+          className={btnClass(machineState, 'start')}
+        >
+          Setup Start
+        </BigButton>
+        <BigButton
+          variant="primary"
+          icon={<RunStartIcon />}
+          sublabel="Start production run"
+          onClick={() => router.push('/kiosk/run/start')}
+          aria-label="Run Start"
+          className={btnClass(machineState, 'start')}
+        >
+          Run Start
+        </BigButton>
+        <BigButton
+          variant="secondary"
+          icon={<QcCheckIcon />}
+          sublabel="In-process quality check"
+          onClick={() => router.push('/kiosk/qc')}
+          aria-label="QC Check"
+          className={`col-span-2 ${btnClass(machineState, 'start')}`}
+        >
+          QC Check
+        </BigButton>
+      </div>
+
+      {/* Live jobs on this machine */}
+      <div className="w-full max-w-xl mx-auto flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <h2 className={`text-sm font-black uppercase tracking-widest ${headingCls}`}>
+            Active Jobs on this Machine
+          </h2>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${onColor ? 'bg-white/20 text-white' : 'bg-secondary text-muted-foreground'}`}>
+            {sessions.length}
+          </span>
+        </div>
+        {sessions.length === 0 ? (
+          <div className={`rounded-2xl border-2 border-dashed p-6 text-center text-sm ${onColor ? 'border-white/30 text-white/70' : 'border-border text-muted-foreground'}`}>
+            No active setups or runs. Use <span className="font-semibold">Setup Start</span> or <span className="font-semibold">Run Start</span> above to add one.
+          </div>
+        ) : (
+          sessions.map(s => (
+            <SessionCard key={s.id} session={s} onAction={onAction} />
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function KioskHome({ device, sessions }: KioskHomeProps) {
   const router = useRouter()
   const [tab, setTab] = useState<'actions' | 'live'>('actions')
@@ -243,6 +322,10 @@ export function KioskHome({ device, sessions }: KioskHomeProps) {
   const [adminPending, startAdminTransition] = useTransition()
 
   const machineState = getMachineState(sessions)
+
+  // Multi-setup machines get the list-based screen that allows several
+  // concurrent setups / runs. Normal machines keep the locked-loop screen.
+  const isMulti = device.machine?.is_multi_setup ?? false
 
   // Per-type session state used to drive button labels + visibility rules.
   const setupSession = sessions.find(s => s.session_type === 'SETUP') ?? null
@@ -408,7 +491,13 @@ export function KioskHome({ device, sessions }: KioskHomeProps) {
               )}
             </div>
 
-            {showResumePanel ? (
+            {isMulti ? (
+              <MultiActionsBody
+                machineState={machineState}
+                sessions={sessions}
+                onAction={handleSessionAction}
+              />
+            ) : showResumePanel ? (
               <ResumePanel device={device} session={pausedSession!} />
             ) : (
               <div className="flex-1 flex items-center justify-center px-6 pb-8">

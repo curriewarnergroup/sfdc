@@ -205,7 +205,7 @@ export async function getDeviceFromCookie(): Promise<Device | null> {
 
   const { data: device } = await supabase
     .from('devices')
-    .select('*, machine:machines(id, machine_code, description)')
+    .select('*, machine:machines(id, machine_code, description, is_multi_setup)')
     .eq('id', deviceSession.device_id)
     .eq('is_active', true)
     .single()
