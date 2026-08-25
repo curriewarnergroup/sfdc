@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { saveMoCycleTime, type JobTimeRow } from '@/lib/actions/reporting'
+import { saveMoCycleTime, saveMoSetupTarget, type JobTimeRow } from '@/lib/actions/reporting'
 import { Printer, Check, X, Pencil } from 'lucide-react'
 
 type Machine = { id: string; machine_code: string }
@@ -26,6 +26,111 @@ function effTone(pct: number) {
   if (pct >= 95) return 'text-emerald-400 print:text-emerald-700'
   if (pct >= 80) return 'text-amber-400 print:text-amber-700'
   return 'text-red-400 print:text-red-700'
+}
+
+/** Shared efficiency readout: percentage plus a capped bar. */
+function EfficiencyCell({ pct, expectedMins }: { pct: number | null; expectedMins: number | null }) {
+  if (pct == null) return <span className="text-xs text-muted-foreground">—</span>
+  return (
+    <div className="flex flex-col gap-1">
+      <span className={`font-mono text-sm font-bold ${effTone(pct)}`}>{pct}%</span>
+      {expectedMins != null && (
+        <span className="text-[10px] text-muted-foreground">{durationStr(expectedMins)} target</span>
+      )}
+      <div className="h-1 w-20 rounded-full bg-muted overflow-hidden print:hidden">
+        <div
+          className={`h-full rounded-full ${
+            pct >= 95 ? 'bg-emerald-400' : pct >= 80 ? 'bg-amber-400' : 'bg-red-400'
+          }`}
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** Inline editor for the job's target setup time, in hours. */
+function SetupTargetCell({ row }: { row: JobTimeRow }) {
+  const router = useRouter()
+  const [editing, setEditing] = useState(false)
+  const [hours, setHours] = useState(row.setup_target_hours?.toString() ?? '')
+  const [err, setErr] = useState<string | null>(null)
+  const [pending, start] = useTransition()
+
+  function save() {
+    setErr(null)
+    const h = hours.trim() === '' ? null : Number(hours)
+    if (h != null && !(h > 0)) {
+      setErr('Must be greater than zero')
+      return
+    }
+    start(async () => {
+      const res = await saveMoSetupTarget(row.mo_number, h)
+      if (!res.ok) { setErr(res.error); return }
+      setEditing(false)
+      router.refresh()
+    })
+  }
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-1.5 print:hidden">
+        <div className="flex items-center gap-1.5">
+          <input
+            autoFocus
+            value={hours}
+            onChange={e => setHours(e.target.value)}
+            onKeyDown={e => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return
+              if (e.key === 'Enter') save()
+              if (e.key === 'Escape') setEditing(false)
+            }}
+            placeholder="hrs"
+            inputMode="decimal"
+            aria-label={`Target setup hours for ${row.mo_number}`}
+            className="w-16 bg-background border border-border rounded px-2 py-1 text-xs font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+          <span className="text-muted-foreground text-xs">hrs</span>
+          <button
+            onClick={save}
+            disabled={pending}
+            aria-label="Save target setup time"
+            className="p-1 rounded text-emerald-400 hover:bg-accent disabled:opacity-50"
+          >
+            <Check className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => { setEditing(false); setErr(null) }}
+            aria-label="Cancel"
+            className="p-1 rounded text-muted-foreground hover:bg-accent"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        {err && <span className="text-[10px] text-red-400">{err}</span>}
+      </div>
+    )
+  }
+
+  if (row.setup_target_hours == null) {
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        className="text-xs text-muted-foreground hover:text-foreground underline decoration-dotted print:no-underline"
+      >
+        Set target
+      </button>
+    )
+  }
+
+  return (
+    <button onClick={() => setEditing(true)} className="group flex flex-col items-start gap-0.5 text-left">
+      <span className="font-mono text-xs text-foreground flex items-center gap-1">
+        {row.setup_target_hours}h
+        <Pencil className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 print:hidden" />
+      </span>
+    </button>
+  )
 }
 
 function CycleCell({ row }: { row: JobTimeRow }) {
@@ -228,7 +333,12 @@ export function JobTimesClient({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/40">
-                {['Job', 'Machine', 'Setup Time', 'Run Time', 'Qty Made', 'Cycle Time', 'Efficiency', 'Last Activity'].map(h => (
+                {[
+                  'Job', 'Machine',
+                  'Setup Time', 'Setup Target', 'Setup Eff.',
+                  'Run Time', 'Qty Made', 'Cycle Time', 'Run Eff.',
+                  'Last Activity',
+                ].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground whitespace-nowrap">
                     {h}
                   </th>
@@ -238,7 +348,7 @@ export function JobTimesClient({
             <tbody>
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
+                  <td colSpan={10} className="px-4 py-12 text-center text-muted-foreground">
                     No jobs found for these filters.
                   </td>
                 </tr>
@@ -265,6 +375,12 @@ export function JobTimesClient({
                       {r.setup_count} setup{r.setup_count === 1 ? '' : 's'} · {durationStr(r.setup_mins)} elapsed
                     </span>
                   </td>
+                  <td className="px-4 py-3">
+                    <SetupTargetCell row={r} />
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <EfficiencyCell pct={r.setup_efficiency_pct} expectedMins={r.setup_expected_mins} />
+                  </td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     <span className="font-mono text-xs text-foreground">{durationStr(r.run_net_mins)}</span>
                     <span className="block text-[10px] text-muted-foreground">
@@ -279,24 +395,7 @@ export function JobTimesClient({
                     <CycleCell row={r} />
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">
-                    {r.efficiency_pct == null ? (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    ) : (
-                      <div className="flex flex-col gap-1">
-                        <span className={`font-mono text-sm font-bold ${effTone(r.efficiency_pct)}`}>
-                          {r.efficiency_pct}%
-                        </span>
-                        <div className="h-1 w-20 rounded-full bg-muted overflow-hidden print:hidden">
-                          <div
-                            className={`h-full rounded-full ${
-                              r.efficiency_pct >= 95 ? 'bg-emerald-400'
-                                : r.efficiency_pct >= 80 ? 'bg-amber-400' : 'bg-red-400'
-                            }`}
-                            style={{ width: `${Math.min(100, r.efficiency_pct)}%` }}
-                          />
-                        </div>
-                      </div>
-                    )}
+                    <EfficiencyCell pct={r.efficiency_pct} expectedMins={null} />
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                     {fmtDate(r.last_activity)}

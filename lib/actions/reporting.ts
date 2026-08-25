@@ -776,13 +776,15 @@ export async function getPassOffReport(filters?: {
 // ============================================================
 // Job Times & Efficiency Report
 // ------------------------------------------------------------
-// One row per job (MO), splitting time into SETUP vs RUN. When a standard
-// cycle time and quantity are recorded for the job we compare the actual
-// run time against the expected time:
-//   expected mins = (cycle_seconds * quantity) / 60
-//   efficiency %  = expected / actual * 100     (>100 = faster than standard)
-// Efficiency is measured against NET run time (pauses excluded), since
-// pauses are downtime rather than slow running.
+// One row per job (MO), splitting time into SETUP vs RUN, each with its own
+// independent efficiency measured against a recorded standard:
+//
+//   RUN   expected mins = (cycle_seconds * quantity) / 60
+//   SETUP expected mins = setup_target_hours * 60
+//         efficiency %  = expected / actual * 100   (>100 = faster than standard)
+//
+// Both are measured against NET time (pauses excluded), since pauses are
+// downtime rather than slow working.
 // ============================================================
 
 export type JobTimeRow = {
@@ -804,6 +806,9 @@ export type JobTimeRow = {
   quantity: number | null
   expected_mins: number | null
   efficiency_pct: number | null
+  setup_target_hours: number | null
+  setup_expected_mins: number | null
+  setup_efficiency_pct: number | null
 }
 
 export async function getJobTimesReport(filters?: {
@@ -837,18 +842,23 @@ export async function getJobTimesReport(filters?: {
     list.map(s => s.id),
   )
 
-  // 3. Standard cycle times. The table is applied by migration 007 — if it
+  // 3. Recorded standards. The table is applied by migration 007 — if it
   //    hasn't been run yet the report still works, just without efficiency.
-  const cycleMap = new Map<string, { cycle_seconds: number; quantity: number }>()
+  type Std = { cycle_seconds: number | null; quantity: number | null; setup_target_hours: number | null }
+  const cycleMap = new Map<string, Std>()
   const { data: cycles } = await supabase
     .from('mo_cycle_times')
-    .select('mo_number, cycle_seconds, quantity')
+    .select('mo_number, cycle_seconds, quantity, setup_target_hours')
   for (const c of cycles ?? []) {
-    cycleMap.set(c.mo_number, { cycle_seconds: Number(c.cycle_seconds), quantity: c.quantity })
+    cycleMap.set(c.mo_number, {
+      cycle_seconds: c.cycle_seconds == null ? null : Number(c.cycle_seconds),
+      quantity: c.quantity ?? null,
+      setup_target_hours: c.setup_target_hours == null ? null : Number(c.setup_target_hours),
+    })
   }
 
   // 4. Aggregate per MO.
-  type Agg = Omit<JobTimeRow, 'machine_codes' | 'operators' | 'cycle_seconds' | 'quantity' | 'expected_mins' | 'efficiency_pct'> & {
+  type Agg = Omit<JobTimeRow, 'machine_codes' | 'operators' | 'cycle_seconds' | 'quantity' | 'expected_mins' | 'efficiency_pct' | 'setup_target_hours' | 'setup_expected_mins' | 'setup_efficiency_pct'> & {
     machines: Set<string>
     ops: Set<string>
   }
@@ -908,8 +918,19 @@ export async function getJobTimesReport(filters?: {
   const rows: JobTimeRow[] = [...byMo.values()]
     .map(a => {
       const std = cycleMap.get(a.mo_number) ?? null
-      const expected = std ? (std.cycle_seconds * std.quantity) / 60 : null
+
+      // Run standard: cycle seconds x quantity.
+      const expected =
+        std?.cycle_seconds != null && std.quantity != null
+          ? (std.cycle_seconds * std.quantity) / 60
+          : null
       const actual = a.run_net_mins
+
+      // Setup standard: target hours, compared against net setup time.
+      const setupExpected =
+        std?.setup_target_hours != null ? std.setup_target_hours * 60 : null
+      const setupActual = a.setup_net_mins
+
       return {
         mo_number: a.mo_number,
         machine_codes: [...a.machines].sort(),
@@ -930,6 +951,12 @@ export async function getJobTimesReport(filters?: {
         expected_mins: expected != null ? Math.round(expected) : null,
         efficiency_pct:
           expected != null && actual > 0 ? Math.round((expected / actual) * 100) : null,
+        setup_target_hours: std?.setup_target_hours ?? null,
+        setup_expected_mins: setupExpected != null ? Math.round(setupExpected) : null,
+        setup_efficiency_pct:
+          setupExpected != null && setupActual > 0
+            ? Math.round((setupExpected / setupActual) * 100)
+            : null,
       }
     })
     .sort((a, b) => new Date(b.last_activity).getTime() - new Date(a.last_activity).getTime())
@@ -942,34 +969,72 @@ export async function getJobTimesReport(filters?: {
   return { rows, machines: sortedMachines, cycleTableReady: cycles != null }
 }
 
-// Save (or clear) the standard cycle time for a job.
-export async function saveMoCycleTime(
+// Write one of the two standards for a job, leaving the other untouched.
+// Passing nulls clears just that standard; the row is removed once neither
+// standard remains.
+async function saveStandard(
   moNumber: string,
-  cycleSeconds: number | null,
-  quantity: number | null,
+  patch: Partial<{ cycle_seconds: number | null; quantity: number | null; setup_target_hours: number | null }>,
 ) {
   const supabase = createServiceClient()
 
-  // Blank input clears the standard for this job.
-  if (cycleSeconds == null || quantity == null) {
-    const { error } = await supabase.from('mo_cycle_times').delete().eq('mo_number', moNumber)
-    if (error) return { ok: false as const, error: error.message }
-    revalidatePath('/reporting/jobs')
-    return { ok: true as const }
+  const { data: existing } = await supabase
+    .from('mo_cycle_times')
+    .select('cycle_seconds, quantity, setup_target_hours')
+    .eq('mo_number', moNumber)
+    .maybeSingle()
+
+  const merged = {
+    cycle_seconds: 'cycle_seconds' in patch ? patch.cycle_seconds : (existing?.cycle_seconds ?? null),
+    quantity: 'quantity' in patch ? patch.quantity : (existing?.quantity ?? null),
+    setup_target_hours:
+      'setup_target_hours' in patch ? patch.setup_target_hours : (existing?.setup_target_hours ?? null),
   }
 
-  if (!(cycleSeconds > 0) || !Number.isInteger(quantity) || quantity <= 0) {
-    return { ok: false as const, error: 'Cycle time and quantity must both be greater than zero.' }
+  // Nothing left to store for this job.
+  if (merged.cycle_seconds == null && merged.setup_target_hours == null) {
+    if (existing) {
+      const { error } = await supabase.from('mo_cycle_times').delete().eq('mo_number', moNumber)
+      if (error) return { ok: false as const, error: error.message }
+    }
+    revalidatePath('/reporting/jobs')
+    return { ok: true as const }
   }
 
   const { error } = await supabase
     .from('mo_cycle_times')
     .upsert(
-      { mo_number: moNumber, cycle_seconds: cycleSeconds, quantity, updated_at: new Date().toISOString() },
+      { mo_number: moNumber, ...merged, updated_at: new Date().toISOString() },
       { onConflict: 'mo_number' },
     )
   if (error) return { ok: false as const, error: error.message }
 
   revalidatePath('/reporting/jobs')
   return { ok: true as const }
+}
+
+// Save (or clear) the standard cycle time + quantity for a job.
+export async function saveMoCycleTime(
+  moNumber: string,
+  cycleSeconds: number | null,
+  quantity: number | null,
+) {
+  if (cycleSeconds == null || quantity == null) {
+    return saveStandard(moNumber, { cycle_seconds: null, quantity: null })
+  }
+  if (!(cycleSeconds > 0) || !Number.isInteger(quantity) || quantity <= 0) {
+    return { ok: false as const, error: 'Cycle time and quantity must both be greater than zero.' }
+  }
+  return saveStandard(moNumber, { cycle_seconds: cycleSeconds, quantity })
+}
+
+// Save (or clear) the target setup time for a job, in hours.
+export async function saveMoSetupTarget(moNumber: string, setupTargetHours: number | null) {
+  if (setupTargetHours == null) {
+    return saveStandard(moNumber, { setup_target_hours: null })
+  }
+  if (!(setupTargetHours > 0)) {
+    return { ok: false as const, error: 'Target setup time must be greater than zero.' }
+  }
+  return saveStandard(moNumber, { setup_target_hours: setupTargetHours })
 }
