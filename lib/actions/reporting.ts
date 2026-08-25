@@ -1,5 +1,6 @@
 'use server'
 
+import { revalidatePath } from 'next/cache'
 import { createServiceClient } from '@/lib/supabase/service'
 import { londonDayKey, firstShiftEndAtOrAfter, nextLondonMidnight } from '@/lib/tz'
 
@@ -770,4 +771,205 @@ export async function getPassOffReport(filters?: {
   )
 
   return { rows, machines: sortedMachines, users: users ?? [] }
+}
+
+// ============================================================
+// Job Times & Efficiency Report
+// ------------------------------------------------------------
+// One row per job (MO), splitting time into SETUP vs RUN. When a standard
+// cycle time and quantity are recorded for the job we compare the actual
+// run time against the expected time:
+//   expected mins = (cycle_seconds * quantity) / 60
+//   efficiency %  = expected / actual * 100     (>100 = faster than standard)
+// Efficiency is measured against NET run time (pauses excluded), since
+// pauses are downtime rather than slow running.
+// ============================================================
+
+export type JobTimeRow = {
+  mo_number: string
+  machine_codes: string[]
+  operators: string[]
+  first_started: string
+  last_activity: string
+  setup_mins: number
+  setup_net_mins: number
+  setup_count: number
+  run_mins: number
+  run_net_mins: number
+  run_paused_mins: number
+  run_count: number
+  qty_made: number
+  is_live: boolean
+  cycle_seconds: number | null
+  quantity: number | null
+  expected_mins: number | null
+  efficiency_pct: number | null
+}
+
+export async function getJobTimesReport(filters?: {
+  from?: string
+  to?: string
+  mo?: string
+  machineId?: string
+}) {
+  const supabase = createServiceClient()
+  const { from, to, mo, machineId } = filters ?? {}
+
+  // 1. All SETUP + RUN sessions in scope, with the operator's shift so
+  //    post-shift time is clamped the same way as every other report.
+  let q = supabase
+    .from('sessions')
+    .select('id, mo_number, machine_id, session_type, status, started_at, ended_at, break_deducted_minutes, qty_made, machine:machines(machine_code), user:shopfloor_users!user_id(display_name, shift:shift_patterns(end_time))')
+    .in('session_type', ['SETUP', 'RUN'])
+    .order('started_at', { ascending: false })
+    .limit(4000)
+  if (from)      q = q.gte('started_at', from)
+  if (to)        q = q.lte('started_at', to + 'T23:59:59')
+  if (mo)        q = q.ilike('mo_number', `%${mo}%`)
+  if (machineId) q = q.eq('machine_id', machineId)
+  const { data: sessions } = await q
+
+  const list = (sessions ?? []).filter(s => s.mo_number)
+
+  // 2. Replay pause/resume events to split elapsed into worked vs paused.
+  const { events: eventsBySession, overrunAuthorised } = await fetchTimingEvents(
+    supabase,
+    list.map(s => s.id),
+  )
+
+  // 3. Standard cycle times. The table is applied by migration 007 — if it
+  //    hasn't been run yet the report still works, just without efficiency.
+  const cycleMap = new Map<string, { cycle_seconds: number; quantity: number }>()
+  const { data: cycles } = await supabase
+    .from('mo_cycle_times')
+    .select('mo_number, cycle_seconds, quantity')
+  for (const c of cycles ?? []) {
+    cycleMap.set(c.mo_number, { cycle_seconds: Number(c.cycle_seconds), quantity: c.quantity })
+  }
+
+  // 4. Aggregate per MO.
+  type Agg = Omit<JobTimeRow, 'machine_codes' | 'operators' | 'cycle_seconds' | 'quantity' | 'expected_mins' | 'efficiency_pct'> & {
+    machines: Set<string>
+    ops: Set<string>
+  }
+  const byMo = new Map<string, Agg>()
+
+  for (const s of list) {
+    const t = computeSessionTiming(
+      s.started_at,
+      s.ended_at,
+      s.break_deducted_minutes ?? 0,
+      eventsBySession.get(s.id) ?? [],
+      {
+        endTime: (s.user as any)?.shift?.end_time ?? null,
+        startMs: new Date(s.started_at).getTime(),
+        overrunAuthorised: overrunAuthorised.has(s.id),
+      },
+    )
+
+    const cur = byMo.get(s.mo_number) ?? {
+      mo_number: s.mo_number,
+      first_started: s.started_at,
+      last_activity: s.ended_at ?? s.started_at,
+      setup_mins: 0, setup_net_mins: 0, setup_count: 0,
+      run_mins: 0, run_net_mins: 0, run_paused_mins: 0, run_count: 0,
+      qty_made: 0,
+      is_live: false,
+      machines: new Set<string>(),
+      ops: new Set<string>(),
+    }
+
+    if (s.session_type === 'SETUP') {
+      cur.setup_mins += t.totalMs / 60000
+      cur.setup_net_mins += t.netMs / 60000
+      cur.setup_count += 1
+    } else {
+      cur.run_mins += t.totalMs / 60000
+      cur.run_net_mins += t.netMs / 60000
+      cur.run_paused_mins += t.pausedMs / 60000
+      cur.run_count += 1
+      // Quantity made is reported on the run session, take the highest seen.
+      cur.qty_made = Math.max(cur.qty_made, s.qty_made ?? 0)
+    }
+
+    if (s.status === 'ACTIVE' || s.status === 'PAUSED') cur.is_live = true
+    const code = (s.machine as any)?.machine_code
+    if (code) cur.machines.add(code)
+    const op = (s.user as any)?.display_name
+    if (op) cur.ops.add(op)
+    if (new Date(s.started_at) < new Date(cur.first_started)) cur.first_started = s.started_at
+    const act = s.ended_at ?? s.started_at
+    if (new Date(act) > new Date(cur.last_activity)) cur.last_activity = act
+
+    byMo.set(s.mo_number, cur)
+  }
+
+  // 5. Attach the standard and derive efficiency.
+  const rows: JobTimeRow[] = [...byMo.values()]
+    .map(a => {
+      const std = cycleMap.get(a.mo_number) ?? null
+      const expected = std ? (std.cycle_seconds * std.quantity) / 60 : null
+      const actual = a.run_net_mins
+      return {
+        mo_number: a.mo_number,
+        machine_codes: [...a.machines].sort(),
+        operators: [...a.ops].sort(),
+        first_started: a.first_started,
+        last_activity: a.last_activity,
+        setup_mins: Math.round(a.setup_mins),
+        setup_net_mins: Math.round(a.setup_net_mins),
+        setup_count: a.setup_count,
+        run_mins: Math.round(a.run_mins),
+        run_net_mins: Math.round(a.run_net_mins),
+        run_paused_mins: Math.round(a.run_paused_mins),
+        run_count: a.run_count,
+        qty_made: a.qty_made,
+        is_live: a.is_live,
+        cycle_seconds: std?.cycle_seconds ?? null,
+        quantity: std?.quantity ?? null,
+        expected_mins: expected != null ? Math.round(expected) : null,
+        efficiency_pct:
+          expected != null && actual > 0 ? Math.round((expected / actual) * 100) : null,
+      }
+    })
+    .sort((a, b) => new Date(b.last_activity).getTime() - new Date(a.last_activity).getTime())
+
+  const { data: machines } = await supabase.from('machines').select('id, machine_code')
+  const sortedMachines = (machines ?? []).sort((a, b) =>
+    a.machine_code.localeCompare(b.machine_code, undefined, { numeric: true, sensitivity: 'base' })
+  )
+
+  return { rows, machines: sortedMachines, cycleTableReady: cycles != null }
+}
+
+// Save (or clear) the standard cycle time for a job.
+export async function saveMoCycleTime(
+  moNumber: string,
+  cycleSeconds: number | null,
+  quantity: number | null,
+) {
+  const supabase = createServiceClient()
+
+  // Blank input clears the standard for this job.
+  if (cycleSeconds == null || quantity == null) {
+    const { error } = await supabase.from('mo_cycle_times').delete().eq('mo_number', moNumber)
+    if (error) return { ok: false as const, error: error.message }
+    revalidatePath('/reporting/jobs')
+    return { ok: true as const }
+  }
+
+  if (!(cycleSeconds > 0) || !Number.isInteger(quantity) || quantity <= 0) {
+    return { ok: false as const, error: 'Cycle time and quantity must both be greater than zero.' }
+  }
+
+  const { error } = await supabase
+    .from('mo_cycle_times')
+    .upsert(
+      { mo_number: moNumber, cycle_seconds: cycleSeconds, quantity, updated_at: new Date().toISOString() },
+      { onConflict: 'mo_number' },
+    )
+  if (error) return { ok: false as const, error: error.message }
+
+  revalidatePath('/reporting/jobs')
+  return { ok: true as const }
 }
