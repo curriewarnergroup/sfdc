@@ -145,6 +145,12 @@ function EventDetail({ event }: { event: ActivityEvent }) {
       <span className={`text-[11px] font-semibold uppercase tracking-wide ${
         event.result === 'PASS' ? 'text-emerald-400 print:text-emerald-700' : 'text-red-400 print:text-red-700'
       }`}>{event.result}</span>
+      {event.submitted_at && (
+        <span className="text-xs text-muted-foreground print:text-gray-500">
+          Submitted {fmtDate(event.submitted_at)}
+          {event.submitted_by ? ` by ${event.submitted_by}` : ''}
+        </span>
+      )}
       {event.redeemed_by ? (
         <span className="text-xs text-muted-foreground print:text-gray-500">Redeemed by {event.redeemed_by}</span>
       ) : (
@@ -162,6 +168,19 @@ function EventDuration({ event }: { event: ActivityEvent }) {
   }
   if (event._type === 'STOPPAGE') {
     return <span className="font-mono text-xs">{durationStr(event.duration_mins)}</span>
+  }
+  // First-off: how long the job waited in first off before QC decided.
+  if (event.wait_mins != null) {
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span className="font-mono text-xs font-semibold text-purple-400 print:text-purple-700">
+          {durationStr(event.wait_mins)}
+        </span>
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground print:text-gray-500">
+          in first off
+        </span>
+      </div>
+    )
   }
   return <span className="text-muted-foreground print:text-gray-400">—</span>
 }

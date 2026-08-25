@@ -490,6 +490,30 @@ export async function getMachineActivityLog(
       created_at: q.created_at,
     }))
 
+  // --- First-off pass-off timing ---
+  // A job enters first off when the setter pauses with the "First Off
+  // Submission" reason. Pair each FIRST_OFF decision back to that submission
+  // so the log shows how long the job sat waiting to be passed off.
+  const firstOffSubmissions = (pauseEvents as any[])
+    .filter(s => s.pause_reason && /first\s*off/i.test(s.pause_reason))
+    .sort((a, b) => new Date(a.paused_at).getTime() - new Date(b.paused_at).getTime())
+
+  for (const q of qcEvents as any[]) {
+    if (q.code_type !== 'FIRST_OFF') continue
+    const decidedAt = new Date(q.created_at).getTime()
+    // Most recent submission for this MO at or before the QC decision.
+    const match = [...firstOffSubmissions]
+      .reverse()
+      .find(s => s.mo_number === q.mo_number && new Date(s.paused_at).getTime() <= decidedAt)
+    if (!match) continue
+    q.submitted_at = match.paused_at
+    q.submitted_by = match.operator
+    q.wait_mins = Math.round((decidedAt - new Date(match.paused_at).getTime()) / 60000)
+    q.redeem_wait_mins = q.redeemed_at
+      ? Math.round((new Date(q.redeemed_at).getTime() - new Date(match.paused_at).getTime()) / 60000)
+      : null
+  }
+
   // --- In-process Check Results ---
   let checkResultEvents: any[] = []
   if (sessionIds.length > 0) {

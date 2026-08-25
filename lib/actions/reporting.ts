@@ -630,3 +630,144 @@ export async function getOperatorDailyReport() {
     }
   })
 }
+
+// ============================================================
+// First-Off Pass-Off Report
+// ------------------------------------------------------------
+// A job enters first off when the setter pauses the session with the "First
+// Off Submission" reason. It leaves first off when QC records a decision (a
+// qc_codes row) and is fully closed out when the setter redeems the code.
+// This report pairs those three moments so time-to-pass-off can be measured.
+// Failed submissions are included so rejections stay visible.
+// ============================================================
+
+export type PassOffRow = {
+  id: string
+  mo_number: string
+  machine_id: string
+  machine_code: string
+  result: 'PASS' | 'FAIL'
+  submitted_at: string | null
+  submitted_by_id: string | null
+  submitted_by: string | null
+  passed_at: string
+  passed_by_id: string
+  passed_by: string
+  redeemed_at: string | null
+  redeemed_by: string | null
+  wait_mins: number | null
+  redeem_mins: number | null
+}
+
+export async function getPassOffReport(filters?: {
+  from?: string
+  to?: string
+  mo?: string
+  machineId?: string
+  submittedBy?: string
+  passedBy?: string
+  result?: string
+}) {
+  const supabase = createServiceClient()
+  const { from, to, mo, machineId, submittedBy, passedBy, result } = filters ?? {}
+
+  // 1. Which pause reasons mark a first-off submission?
+  const { data: reasons } = await supabase
+    .from('pause_reasons')
+    .select('id')
+    .ilike('label', '%first off%')
+  const reasonIds = (reasons ?? []).map(r => r.id)
+
+  // 2. Every first-off submission, oldest first, with its job + machine.
+  let submissions: any[] = []
+  if (reasonIds.length > 0) {
+    const { data } = await supabase
+      .from('session_events')
+      .select('id, occurred_at, actor_user_id, session:sessions(mo_number, machine_id)')
+      .eq('event_type', 'SESSION_PAUSE')
+      .in('pause_reason_id', reasonIds)
+      .order('occurred_at', { ascending: true })
+    submissions = (data ?? []).filter((s: any) => s.session)
+  }
+
+  // 3. Every first-off QC decision. Date range applies to the pass-off moment.
+  let qcQuery = supabase
+    .from('qc_codes')
+    .select('id, mo_number, machine_id, result, issued_by, created_at, redeemed_at, redeemed_by, machine:machines(id, machine_code)')
+    .eq('code_type', 'FIRST_OFF')
+    .order('created_at', { ascending: false })
+    .limit(1000)
+  if (from)      qcQuery = qcQuery.gte('created_at', from)
+  if (to)        qcQuery = qcQuery.lte('created_at', to + 'T23:59:59')
+  if (mo)        qcQuery = qcQuery.ilike('mo_number', `%${mo}%`)
+  if (machineId) qcQuery = qcQuery.eq('machine_id', machineId)
+  if (result)    qcQuery = qcQuery.eq('result', result)
+  const { data: qcRows } = await qcQuery
+
+  // 4. Resolve display names for everyone involved.
+  const userIds = [...new Set([
+    ...(qcRows ?? []).map((q: any) => q.issued_by),
+    ...(qcRows ?? []).map((q: any) => q.redeemed_by),
+    ...submissions.map(s => s.actor_user_id),
+  ].filter(Boolean))]
+  const nameMap = new Map<string, string>()
+  if (userIds.length > 0) {
+    const { data: us } = await supabase
+      .from('shopfloor_users')
+      .select('id, display_name')
+      .in('id', userIds)
+    for (const u of us ?? []) nameMap.set(u.id, u.display_name)
+  }
+
+  // 5. Pair each decision back to the most recent matching submission.
+  const rows: PassOffRow[] = (qcRows ?? [])
+    .map((q: any) => {
+      const decidedAt = new Date(q.created_at).getTime()
+      const match = [...submissions]
+        .reverse()
+        .find(
+          s =>
+            s.session.mo_number === q.mo_number &&
+            s.session.machine_id === q.machine_id &&
+            new Date(s.occurred_at).getTime() <= decidedAt
+        )
+      const submittedAt = match?.occurred_at ?? null
+      const submittedById = match?.actor_user_id ?? null
+      return {
+        id: q.id,
+        mo_number: q.mo_number,
+        machine_id: q.machine_id,
+        machine_code: q.machine?.machine_code ?? '—',
+        result: q.result,
+        submitted_at: submittedAt,
+        submitted_by_id: submittedById,
+        submitted_by: submittedById ? (nameMap.get(submittedById) ?? '—') : null,
+        passed_at: q.created_at,
+        passed_by_id: q.issued_by,
+        passed_by: nameMap.get(q.issued_by) ?? '—',
+        redeemed_at: q.redeemed_at ?? null,
+        redeemed_by: q.redeemed_by ? (nameMap.get(q.redeemed_by) ?? '—') : null,
+        wait_mins: submittedAt
+          ? Math.round((decidedAt - new Date(submittedAt).getTime()) / 60000)
+          : null,
+        redeem_mins:
+          submittedAt && q.redeemed_at
+            ? Math.round((new Date(q.redeemed_at).getTime() - new Date(submittedAt).getTime()) / 60000)
+            : null,
+      }
+    })
+    .filter(r => !submittedBy || r.submitted_by_id === submittedBy)
+    .filter(r => !passedBy || r.passed_by_id === passedBy)
+
+  // 6. Option lists for the filter controls.
+  const [{ data: machines }, { data: users }] = await Promise.all([
+    supabase.from('machines').select('id, machine_code').order('machine_code'),
+    supabase.from('shopfloor_users').select('id, display_name, role').order('display_name'),
+  ])
+
+  const sortedMachines = (machines ?? []).sort((a, b) =>
+    a.machine_code.localeCompare(b.machine_code, undefined, { numeric: true, sensitivity: 'base' })
+  )
+
+  return { rows, machines: sortedMachines, users: users ?? [] }
+}
