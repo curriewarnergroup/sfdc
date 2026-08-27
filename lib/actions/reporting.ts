@@ -720,18 +720,36 @@ export async function getPassOffReport(filters?: {
     for (const u of us ?? []) nameMap.set(u.id, u.display_name)
   }
 
-  // 5. Pair each decision back to the most recent matching submission.
+  // 5. Pair each decision back to its submission, one-to-one.
+  //    Worked oldest-first so the earliest pass-off claims the earliest
+  //    submission, and a claimed submission is never reused. Without this a
+  //    second pass-off on the same job re-uses the original submission and
+  //    reports a wait of days that never actually happened.
+  const claimed = new Set<string>()
+  const matchByQc = new Map<string, any>()
+  for (const q of [...(qcRows ?? [])].sort(
+    (a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  )) {
+    const decidedAt = new Date(q.created_at).getTime()
+    const match = [...submissions]
+      .reverse()
+      .find(
+        s =>
+          !claimed.has(s.id) &&
+          s.session.mo_number === q.mo_number &&
+          s.session.machine_id === q.machine_id &&
+          new Date(s.occurred_at).getTime() <= decidedAt,
+      )
+    if (match) {
+      claimed.add(match.id)
+      matchByQc.set(q.id, match)
+    }
+  }
+
   const rows: PassOffRow[] = (qcRows ?? [])
     .map((q: any) => {
       const decidedAt = new Date(q.created_at).getTime()
-      const match = [...submissions]
-        .reverse()
-        .find(
-          s =>
-            s.session.mo_number === q.mo_number &&
-            s.session.machine_id === q.machine_id &&
-            new Date(s.occurred_at).getTime() <= decidedAt
-        )
+      const match = matchByQc.get(q.id) ?? null
       const submittedAt = match?.occurred_at ?? null
       const submittedById = match?.actor_user_id ?? null
       return {
