@@ -4,11 +4,13 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useTransition } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Cpu, Users, LogOut, Wrench, CalendarDays } from 'lucide-react'
+import { Cpu, Users, LogOut, Wrench, CalendarDays, ClipboardCheck, Gauge } from 'lucide-react'
 
 const NAV = [
   { href: '/reporting',          label: 'Machines',  icon: Cpu    },
   { href: '/reporting/setup',    label: 'Setup Time', icon: Wrench },
+  { href: '/reporting/jobs',     label: 'Job Times', icon: Gauge  },
+  { href: '/reporting/pass-off', label: 'Pass-Off Times', icon: ClipboardCheck },
   { href: '/reporting/operators',label: 'Operators', icon: Users  },
   { href: '/reporting/daily',    label: 'Daily Work', icon: CalendarDays },
 ]
