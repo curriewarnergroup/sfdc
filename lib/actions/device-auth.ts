@@ -2,6 +2,7 @@
 
 import { cookies } from 'next/headers'
 import { createServiceClient } from '@/lib/supabase/service'
+import { requireAdmin, requireDevice } from '@/lib/auth/guards'
 import crypto from 'crypto'
 import type { ActionResult, Device } from '@/lib/types'
 
@@ -112,6 +113,12 @@ export async function loginDevice(
 }
 
 export async function logoutDevice(): Promise<ActionResult> {
+  try {
+    await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const cookieStore = await cookies()
   const token = cookieStore.get(DEVICE_COOKIE)?.value
 
@@ -145,6 +152,12 @@ export async function logoutDevice(): Promise<ActionResult> {
 }
 
 export async function forceEndDeviceSession(deviceId: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
 
   const { error } = await supabase
@@ -167,6 +180,12 @@ export async function forceEndDeviceSession(deviceId: string): Promise<ActionRes
 export async function getActiveDeviceSessions(): Promise<
   Array<{ device_id: string; started_at: string; expires_at: string }>
 > {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('device_sessions')
@@ -183,32 +202,11 @@ export async function getActiveDeviceSessions(): Promise<
 }
 
 export async function getDeviceFromCookie(): Promise<Device | null> {
-  const cookieStore = await cookies()
-  const token = cookieStore.get(DEVICE_COOKIE)?.value
-  if (!token) return null
-
-  const supabase = createServiceClient()
-  const tokenHash = hashToken(token)
-
-  const { data: deviceSession } = await supabase
-    .from('device_sessions')
-    .select('device_id, expires_at, is_valid')
-    .eq('token_hash', tokenHash)
-    .eq('is_valid', true)
-    .single()
-
-  if (!deviceSession) return null
-  if (deviceSession.expires_at && new Date(deviceSession.expires_at) < new Date()) {
-    await supabase.from('device_sessions').update({ is_valid: false }).eq('token_hash', tokenHash)
+  // requireDevice() implements this exact lookup (hashed token, is_valid,
+  // not expired, device active); reuse it here instead of duplicating it.
+  try {
+    return await requireDevice()
+  } catch {
     return null
   }
-
-  const { data: device } = await supabase
-    .from('devices')
-    .select('*, machine:machines(id, machine_code, description, is_multi_setup)')
-    .eq('id', deviceSession.device_id)
-    .eq('is_active', true)
-    .single()
-
-  return device ?? null
 }

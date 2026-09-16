@@ -2,6 +2,7 @@
 
 import { createServiceClient } from '@/lib/supabase/service'
 import { forceEndDeviceSession } from '@/lib/actions/device-auth'
+import { requireDevice } from '@/lib/auth/guards'
 import { firstShiftEndAtOrAfter } from '@/lib/tz'
 import type { ActionResult } from '@/lib/types'
 
@@ -32,6 +33,14 @@ export type ShiftOverrunStatus = {
 export async function getShiftOverrunStatus(
   deviceId: string,
 ): Promise<ShiftOverrunStatus[]> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return []
+  }
+  if (deviceId !== device.id) return []
+
   const supabase = createServiceClient()
   const now = Date.now()
 
@@ -44,7 +53,7 @@ export async function getShiftOverrunStatus(
     .select(
       'id, session_type, status, started_at, machine:machines(machine_code), user:shopfloor_users!user_id(display_name, shift:shift_patterns(end_time))',
     )
-    .eq('device_id', deviceId)
+    .eq('device_id', device.id)
     .eq('status', 'ACTIVE')
 
   if (!sessions?.length) return []
@@ -99,6 +108,14 @@ export async function authoriseShiftOverrun(params: {
   operatorCode: string
   deviceId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const { data: user } = await supabase
@@ -124,7 +141,7 @@ export async function authoriseShiftOverrun(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_RESUME',
     actor_user_id: user.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: { overrun_authorised: true, confirmed_by: user.display_name },
   })
 
@@ -139,6 +156,14 @@ export async function autoLogoutShiftOverrun(params: {
   sessionId: string
   deviceId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const { data: session } = await supabase
@@ -160,13 +185,13 @@ export async function autoLogoutShiftOverrun(params: {
       session_id: params.sessionId,
       event_type: 'SESSION_PAUSE',
       actor_user_id: session.user_id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { auto_logout: true, reason: 'shift_overrun_no_response' },
     })
   }
 
   // End the kiosk device session so the login screen returns.
-  await forceEndDeviceSession(params.deviceId)
+  await forceEndDeviceSession(device.id)
 
   return { ok: true }
 }

@@ -1,6 +1,7 @@
 'use server'
 
 import { createServiceClient } from '@/lib/supabase/service'
+import { requireAdmin } from '@/lib/auth/guards'
 import type { ActionResult, Session, ShopfloorUser, Machine, ShiftPattern, PauseReason } from '@/lib/types'
 
 // ---- Sessions ----
@@ -14,6 +15,12 @@ export async function getAllSessions(params?: {
   mo?: string
   userId?: string
 }) {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   let query = supabase
     .from('sessions')
@@ -36,6 +43,12 @@ export async function getAllSessions(params?: {
 // Returns all SESSION_PAUSE events for a given machine's sessions,
 // paired with the following SESSION_RESUME (or session end) to calculate duration.
 export async function getMachineStoppages(machineId: string) {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
 
   // Get all session IDs for this machine
@@ -128,6 +141,12 @@ export async function getMachineStoppages(machineId: string) {
 
 // ---- Machine QC Events (first offs, last offs) ----
 export async function getMachineQcEvents(machineId: string) {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
 
   const { data: qcCodes } = await supabase
@@ -169,6 +188,12 @@ export async function getMachineQcEvents(machineId: string) {
 }
 
 export async function getSessionDetail(sessionId: string) {
+  try {
+    await requireAdmin()
+  } catch {
+    return { session: null, events: [] }
+  }
+
   const supabase = createServiceClient()
   const { data: session } = await supabase
     .from('sessions')
@@ -186,6 +211,12 @@ export async function getSessionDetail(sessionId: string) {
 }
 
 export async function autoCloseSession(sessionId: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
 
   const { error } = await supabase
@@ -219,6 +250,12 @@ export async function forceCloseSession(
   sessionId: string,
   reason: ForceCloseReason,
 ): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
 
   if (reason === 'ERROR') {
@@ -284,6 +321,12 @@ export async function forceCloseSession(
 // ---- Devices ----
 
 export async function getAllDevices() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const now = new Date().toISOString()
 
@@ -311,6 +354,12 @@ export async function createDevice(params: {
   stationName: string
   password: string
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.rpc('upsert_device', {
     p_station_name: params.stationName.trim(),
@@ -326,6 +375,12 @@ export async function updateDevice(params: {
   machineId: string | null
   isActive: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase
     .from('devices')
@@ -336,6 +391,12 @@ export async function updateDevice(params: {
 }
 
 export async function deleteDevice(id: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('devices').delete().eq('id', id)
   if (error) return { ok: false, error: error.message }
@@ -351,6 +412,12 @@ export async function getMachineActivityLog(
   machineId: string,
   filters?: { from?: string; to?: string; mo?: string; userId?: string }
 ) {
+  try {
+    await requireAdmin()
+  } catch {
+    return { events: [], users: [] }
+  }
+
   const supabase = createServiceClient()
   const { from, to, mo, userId } = filters ?? {}
 
@@ -576,6 +643,12 @@ export async function getMachineActivityLog(
 }
 
 export async function getAllShopfloorUsers() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('shopfloor_users')
@@ -590,6 +663,12 @@ export async function createShopfloorUser(params: {
   role: string
   shiftId?: string
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('shopfloor_users').insert({
     user_code: params.userCode.trim(),
@@ -602,6 +681,12 @@ export async function createShopfloorUser(params: {
 }
 
 export async function toggleShopfloorUser(userId: string, isActive: boolean): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('shopfloor_users').update({ is_active: isActive }).eq('id', userId)
   if (error) return { ok: false, error: error.message }
@@ -613,6 +698,12 @@ export async function toggleShopfloorUser(userId: string, isActive: boolean): Pr
 // to an ADMIN-role shopfloor_users record.
 
 export async function getAdminUsers() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data: links } = await supabase
     .from('admin_users')
@@ -642,6 +733,12 @@ export async function createAdminUser(params: {
   displayName: string
   userCode: string
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const email = params.email.trim().toLowerCase()
 
@@ -687,6 +784,12 @@ export async function createAdminUser(params: {
 }
 
 export async function revokeAdminUser(authUid: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
 
   // Find the linked shopfloor user first
@@ -710,6 +813,12 @@ export async function revokeAdminUser(authUid: string): Promise<ActionResult> {
 // ---- Shift Patterns ----
 
 export async function getShiftPatterns() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('shift_patterns')
@@ -721,12 +830,24 @@ export async function getShiftPatterns() {
 // ---- Pause Reasons ----
 
 export async function getPauseReasonsAdmin() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase.from('pause_reasons').select('*').order('label')
   return data ?? []
 }
 
 export async function createPauseReason(label: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('pause_reasons').insert({ label: label.trim() })
   if (error) return { ok: false, error: error.message }
@@ -736,6 +857,12 @@ export async function createPauseReason(label: string): Promise<ActionResult> {
 // ---- Audit log ----
 
 export async function getAuditLog(limit = 100) {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('audit_log')
@@ -748,6 +875,12 @@ export async function getAuditLog(limit = 100) {
 // ---- Shift closeout: auto-close stale sessions ----
 
 export async function runShiftCloseout(): Promise<ActionResult<{ closed: number }>> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
 
   // Only close sessions left ACTIVE (running) at shift end. PAUSED sessions are
@@ -790,6 +923,12 @@ export async function runShiftCloseout(): Promise<ActionResult<{ closed: number 
 // ---- QC Check Templates ----
 
 export async function getCheckTemplates() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('check_templates')
@@ -808,6 +947,12 @@ export async function createCheckTemplate(params: {
   unit?: string
   product_id?: string
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('check_templates').insert({
     name: params.name.trim(),
@@ -834,6 +979,12 @@ export async function updateCheckTemplate(id: string, params: {
   product_id?: string
   is_active: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('check_templates').update({
     name: params.name.trim(),
@@ -853,6 +1004,12 @@ export async function updateCheckTemplate(id: string, params: {
 // ---- MO Check Assignments ----
 
 export async function getMoCheckAssignments(moNumber: string) {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('mo_check_assignments')
@@ -863,6 +1020,12 @@ export async function getMoCheckAssignments(moNumber: string) {
 }
 
 export async function getAllMoAssignments() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('mo_check_assignments')
@@ -886,6 +1049,12 @@ export async function addMoCheckAssignment(params: {
   check_template_id: string
   required: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { data: existing } = await supabase
     .from('mo_check_assignments')
@@ -906,6 +1075,12 @@ export async function addMoCheckAssignment(params: {
 }
 
 export async function removeMoCheckAssignment(id: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('mo_check_assignments').delete().eq('id', id)
   if (error) return { ok: false, error: error.message }
@@ -924,6 +1099,12 @@ export async function importMoChecksFromExcel(rows: Array<{
   unit?: string
   required?: boolean
 }>): Promise<ActionResult<{ imported: number }>> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   let imported = 0
 
@@ -982,6 +1163,12 @@ export async function getCheckResults(filters?: {
   from?: string
   to?: string
 }) {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   let query = supabase
     .from('check_results')
@@ -1011,6 +1198,12 @@ export async function submitCheckResult(params: {
   checked_by: string
   notes?: string
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('check_results').insert({
     mo_number: params.mo_number,
@@ -1029,6 +1222,12 @@ export async function submitCheckResult(params: {
 }
 
 export async function getAllMachines() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase.from('machines').select('*').order('machine_code')
   return data ?? []
@@ -1039,6 +1238,12 @@ export async function createMachine(params: {
   description: string
   isMultiSetup?: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('machines').insert({
     machine_code: params.machineCode.trim().toUpperCase(),
@@ -1056,6 +1261,12 @@ export async function updateMachine(params: {
   isActive: boolean
   isMultiSetup?: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase
     .from('machines')
@@ -1080,6 +1291,12 @@ export async function updateMachine(params: {
 }
 
 export async function deleteMachine(id: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('machines').delete().eq('id', id)
   if (error) return { ok: false, error: error.message }
@@ -1094,6 +1311,12 @@ export async function createShiftPattern(params: {
   endTime: string
   breakMinutes?: number
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('shift_patterns').insert({
     name: params.shiftName.trim(),
@@ -1113,6 +1336,12 @@ export async function updateShiftPattern(params: {
   breakMinutes?: number
   isActive: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase
     .from('shift_patterns')
@@ -1128,6 +1357,12 @@ export async function updateShiftPattern(params: {
 }
 
 export async function deleteShiftPattern(id: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('shift_patterns').delete().eq('id', id)
   if (error) return { ok: false, error: error.message }
@@ -1142,6 +1377,12 @@ export async function updatePauseReason(params: {
   appliesTo: string[]
   isActive: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase
     .from('pause_reasons')
@@ -1152,6 +1393,12 @@ export async function updatePauseReason(params: {
 }
 
 export async function deletePauseReason(id: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('pause_reasons').delete().eq('id', id)
   if (error) return { ok: false, error: error.message }
@@ -1167,6 +1414,12 @@ export async function updateShopfloorUser(params: {
   shiftId?: string | null
   isActive: boolean
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase
     .from('shopfloor_users')
@@ -1182,6 +1435,12 @@ export async function updateShopfloorUser(params: {
 }
 
 export async function deleteShopfloorUser(id: string): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
   const { error } = await supabase.from('shopfloor_users').delete().eq('id', id)
   if (error) return { ok: false, error: error.message }
@@ -1191,6 +1450,12 @@ export async function deleteShopfloorUser(id: string): Promise<ActionResult> {
 // ---- Dashboard stats ----
 
 export async function getDashboardStats() {
+  try {
+    await requireAdmin()
+  } catch {
+    return { activeSessions: [], longRunning: [], pausedSessions: [], unmannedSessions: [], recentAudit: [] }
+  }
+
   const supabase = createServiceClient()
   const now = Date.now()
 
@@ -1227,7 +1492,12 @@ export async function getDashboardStats() {
 // ---- Admin sign-out ----
 
 export async function adminSignOut(): Promise<void> {
-  'use server'
+  try {
+    await requireAdmin()
+  } catch {
+    return
+  }
+
   const { createClient } = await import('@/lib/supabase/server')
   const supabase = await createClient()
   await supabase.auth.signOut()

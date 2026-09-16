@@ -1,10 +1,14 @@
 'use server'
 
 import { createServiceClient } from '@/lib/supabase/service'
+import { requireDevice, requireAdmin } from '@/lib/auth/guards'
 import type { ActionResult, Session, SessionEvent, ShopfloorUser } from '@/lib/types'
 
 // ---- Lookup helpers ----
 
+// Public: used by the kiosk login/lookup flow before a device session may
+// exist for the caller (see app/api/kiosk/lookup-user/route.ts, which itself
+// calls requireDevice() before invoking this).
 export async function lookupUserByCode(userCode: string): Promise<ShopfloorUser | null> {
   const supabase = createServiceClient()
   const { data } = await supabase
@@ -17,6 +21,11 @@ export async function lookupUserByCode(userCode: string): Promise<ShopfloorUser 
 }
 
 export async function getActiveMachines() {
+  try {
+    await requireDevice()
+  } catch {
+    return []
+  }
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('machines')
@@ -27,6 +36,11 @@ export async function getActiveMachines() {
 }
 
 export async function getPauseReasons() {
+  try {
+    await requireDevice()
+  } catch {
+    return []
+  }
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('pause_reasons')
@@ -37,11 +51,19 @@ export async function getPauseReasons() {
 }
 
 export async function getActiveSessionForDevice(deviceId: string): Promise<Session | null> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return null
+  }
+  if (deviceId !== device.id) return null
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('sessions')
     .select('*, machine:machines(*), user:shopfloor_users!user_id(*), device:devices(*)')
-    .eq('device_id', deviceId)
+    .eq('device_id', device.id)
     .in('status', ['ACTIVE', 'PAUSED'])
     .limit(1)
     .maybeSingle()
@@ -49,17 +71,30 @@ export async function getActiveSessionForDevice(deviceId: string): Promise<Sessi
 }
 
 export async function getAllActiveSessionsForDevice(deviceId: string): Promise<Session[]> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return []
+  }
+  if (deviceId !== device.id) return []
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('sessions')
     .select('*, machine:machines(*), user:shopfloor_users!user_id(*), device:devices(*)')
-    .eq('device_id', deviceId)
+    .eq('device_id', device.id)
     .in('status', ['ACTIVE', 'PAUSED'])
     .order('started_at', { ascending: false })
   return (data ?? []) as Session[]
 }
 
 export async function getRecentEventsForSession(sessionId: string): Promise<SessionEvent[]> {
+  try {
+    await requireDevice()
+  } catch {
+    return []
+  }
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('session_events')
@@ -81,6 +116,14 @@ export async function startSession(params: {
   // Optional SUPERVISOR/ADMIN code that bypasses the First-Off requirement.
   supervisorOverrideCode?: string
 }): Promise<ActionResult<{ session: Session }>> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   // Resolve user
@@ -183,7 +226,7 @@ export async function startSession(params: {
       mo_number: params.moNumber.trim().toUpperCase(),
       machine_id: params.machineId,
       user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       allow_multi: allowMulti,
       ...(firstOffOverrideBy ? { authorised_by: firstOffOverrideBy.id } : {}),
     })
@@ -199,7 +242,7 @@ export async function startSession(params: {
     session_id: session.id,
     event_type: 'SESSION_START',
     actor_user_id: user.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: {
       session_type: params.sessionType,
       mo_number: params.moNumber,
@@ -220,6 +263,14 @@ export async function authoriseUnmannedRun(params: {
   machineId: string
   moNumber: string
 }): Promise<ActionResult<{ session: Session }>> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   // Verify supervisor exists and has SUPERVISOR or ADMIN role
@@ -285,7 +336,7 @@ export async function authoriseUnmannedRun(params: {
       session_id: session.id,
       event_type: 'SESSION_START',
       actor_user_id: supervisor.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { session_type: 'UNMANNED', mo_number: existing.mo_number, authorised_by: supervisor.display_name, converted_from: existing.session_type },
     })
   } else {
@@ -299,7 +350,7 @@ export async function authoriseUnmannedRun(params: {
         mo_number: moNumber,
         machine_id: params.machineId,
         user_id: supervisor.id,
-        device_id: params.deviceId,
+        device_id: device.id,
         authorised_by: supervisor.id,
         allow_multi: unmannedAllowMulti,
       })
@@ -315,7 +366,7 @@ export async function authoriseUnmannedRun(params: {
       session_id: session.id,
       event_type: 'SESSION_START',
       actor_user_id: supervisor.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { session_type: 'UNMANNED', mo_number: moNumber, authorised_by: supervisor.display_name },
     })
   }
@@ -328,6 +379,14 @@ export async function convertToMannedRun(params: {
   actorUserCode: string
   deviceId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const actor = await lookupUserByCode(params.actorUserCode)
@@ -344,7 +403,7 @@ export async function convertToMannedRun(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_START',
     actor_user_id: actor.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: { converted_to: 'RUN' },
   })
 
@@ -357,6 +416,14 @@ export async function pauseSession(params: {
   pauseReasonId: string
   deviceId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const user = await lookupUserByCode(params.actorUserCode)
@@ -374,7 +441,7 @@ export async function pauseSession(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_PAUSE',
     actor_user_id: user.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     pause_reason_id: params.pauseReasonId,
     metadata: {},
   })
@@ -390,6 +457,14 @@ export async function signOffJob(params: {
   actorUserCode: string
   deviceId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const user = await lookupUserByCode(params.actorUserCode)
@@ -407,7 +482,7 @@ export async function signOffJob(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_PAUSE',
     actor_user_id: user.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: { handover: true, signed_off_by: user.display_name },
   })
 
@@ -423,6 +498,14 @@ export async function resumeSession(params: {
   // to whoever is actually running the machine now.
   reassignOperator?: boolean
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const user = await lookupUserByCode(params.actorUserCode)
@@ -445,7 +528,7 @@ export async function resumeSession(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_RESUME',
     actor_user_id: user.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: params.reassignOperator ? { signed_on_by: user.display_name } : {},
   })
 
@@ -459,6 +542,14 @@ export async function supervisorPauseUnmannedSession(params: {
   pauseReasonId: string
   deviceId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const supervisor = await lookupUserByCode(params.supervisorCode)
@@ -479,7 +570,7 @@ export async function supervisorPauseUnmannedSession(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_PAUSE',
     actor_user_id: supervisor.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     pause_reason_id: params.pauseReasonId,
     metadata: { supervisor_override: true },
   })
@@ -493,6 +584,14 @@ export async function supervisorResumeUnmannedSession(params: {
   supervisorCode: string
   deviceId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const supervisor = await lookupUserByCode(params.supervisorCode)
@@ -513,18 +612,26 @@ export async function supervisorResumeUnmannedSession(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_RESUME',
     actor_user_id: supervisor.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: { supervisor_override: true },
   })
 
   return { ok: true }
 }
 
-// Admin-side pause (no code required — admin is already authenticated)
+// Admin-side pause (no code required — admin is already authenticated).
+// Called from the admin console, not the kiosk, so this is gated on the
+// Supabase Auth admin session rather than a device cookie.
 export async function adminPauseSession(params: {
   sessionId: string
   pauseReasonId: string
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
 
   const { error } = await supabase
@@ -548,6 +655,12 @@ export async function adminPauseSession(params: {
 export async function adminResumeSession(params: {
   sessionId: string
 }): Promise<ActionResult> {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+
   const supabase = createServiceClient()
 
   const { error } = await supabase
@@ -573,6 +686,14 @@ export async function finishSession(params: {
   deviceId: string
   notes?: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const user = await lookupUserByCode(params.actorUserCode)
@@ -617,7 +738,7 @@ export async function finishSession(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_FINISH',
     actor_user_id: user.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: { notes: params.notes ?? '' },
   })
 
@@ -632,6 +753,14 @@ export async function redeemQcCode(params: {
   actorUserCode: string
   deviceId: string
 }): Promise<ActionResult<{ result: 'PASS' | 'FAIL'; codeType: string }>> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
   const crypto = await import('crypto')
 
@@ -652,7 +781,7 @@ export async function redeemQcCode(params: {
       session_id: params.sessionId,
       event_type: 'QC_CODE_REDEEMED_FAILED',
       actor_user_id: user?.id ?? null,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { reason: 'invalid_or_expired' },
     })
     return { ok: false, error: 'QC code not found, already used, or expired.' }
@@ -680,7 +809,7 @@ export async function redeemQcCode(params: {
     session_id: params.sessionId,
     event_type: 'QC_CODE_REDEEMED',
     actor_user_id: user?.id ?? null,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: { code_type: qcCode.code_type, result: qcCode.result },
   })
 
@@ -693,6 +822,13 @@ export async function getSetupSessionsForStation(params: {
   deviceId: string
   allStations: boolean
 }) {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   let query = supabase
     .from('sessions')
@@ -702,7 +838,7 @@ export async function getSetupSessionsForStation(params: {
     .order('started_at', { ascending: false })
 
   if (!params.allStations) {
-    query = query.eq('device_id', params.deviceId)
+    query = query.eq('device_id', device.id)
   }
 
   const { data } = await query
@@ -716,13 +852,21 @@ export async function recordTakeoverEvent(params: {
   confirmed: boolean
   originalUserId: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
   const actor = await lookupUserByCode(params.actorUserCode)
   await supabase.from('session_events').insert({
     session_id: params.sessionId,
     event_type: 'SESSION_START', // reuse closest semantic event; metadata carries intent
     actor_user_id: actor?.id ?? null,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: {
       takeover: true,
       confirmed: params.confirmed,
@@ -738,6 +882,14 @@ export async function finishSetupSession(params: {
   deviceId: string
   qcCode: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
   const cryptoMod = await import('crypto')
 
@@ -761,7 +913,7 @@ export async function finishSetupSession(params: {
       session_id: params.sessionId,
       event_type: 'QC_CODE_REDEEMED_FAILED',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { reason: 'invalid_or_expired', code_type: 'FIRST_OFF' },
     })
     return { ok: false, error: 'QC code invalid, expired, or already used.' }
@@ -784,7 +936,7 @@ export async function finishSetupSession(params: {
       session_id: params.sessionId,
       event_type: 'QC_CODE_REDEEMED_FAILED',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { reason: 'mo_machine_mismatch', code_type: 'FIRST_OFF' },
     })
     return {
@@ -818,14 +970,14 @@ export async function finishSetupSession(params: {
       session_id: params.sessionId,
       event_type: 'QC_CODE_REDEEMED',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { code_type: 'FIRST_OFF', result: qcCode.result },
     },
     {
       session_id: params.sessionId,
       event_type: 'SESSION_FINISH',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { first_off_approved: qcCode.result === 'PASS' },
     },
   ])
@@ -842,6 +994,14 @@ export async function cancelSetupSession(params: {
   deviceId: string
   reason?: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
 
   const supervisor = await lookupUserByCode(params.supervisorCode)
@@ -866,7 +1026,7 @@ export async function cancelSetupSession(params: {
     session_id: params.sessionId,
     event_type: 'SESSION_AUTO_CLOSE',
     actor_user_id: supervisor.id,
-    device_id: params.deviceId,
+    device_id: device.id,
     metadata: { cancelled_setup: true, supervisor_override: true, reason: params.reason ?? null },
   })
 
@@ -879,6 +1039,13 @@ export async function getRunSessionsForStation(params: {
   deviceId: string
   allStations: boolean
 }) {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   let query = supabase
     .from('sessions')
@@ -888,7 +1055,7 @@ export async function getRunSessionsForStation(params: {
     .order('started_at', { ascending: false })
 
   if (!params.allStations) {
-    query = query.eq('device_id', params.deviceId)
+    query = query.eq('device_id', device.id)
   }
 
   const { data } = await query
@@ -901,6 +1068,14 @@ export async function finishRunSession(params: {
   deviceId: string
   qcCode: string
 }): Promise<ActionResult> {
+  let device
+  try {
+    device = await requireDevice()
+  } catch {
+    return { ok: false, error: 'Not authorised.' }
+  }
+  if (params.deviceId !== device.id) return { ok: false, error: 'Not authorised.' }
+
   const supabase = createServiceClient()
   const cryptoMod = await import('crypto')
 
@@ -923,7 +1098,7 @@ export async function finishRunSession(params: {
       session_id: params.sessionId,
       event_type: 'QC_CODE_REDEEMED_FAILED',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { reason: 'invalid_or_expired', code_type: 'LAST_OFF' },
     })
     return { ok: false, error: 'Last-Off QC code invalid, expired, or already used.' }
@@ -943,7 +1118,7 @@ export async function finishRunSession(params: {
       session_id: params.sessionId,
       event_type: 'QC_CODE_REDEEMED_FAILED',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { reason: 'mo_machine_mismatch', code_type: 'LAST_OFF' },
     })
     return {
@@ -973,14 +1148,14 @@ export async function finishRunSession(params: {
       session_id: params.sessionId,
       event_type: 'QC_CODE_REDEEMED',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { code_type: 'LAST_OFF', result: qcCode.result },
     },
     {
       session_id: params.sessionId,
       event_type: 'SESSION_FINISH',
       actor_user_id: user.id,
-      device_id: params.deviceId,
+      device_id: device.id,
       metadata: { last_off_result: qcCode.result },
     },
   ])
@@ -991,6 +1166,11 @@ export async function finishRunSession(params: {
 // ---- Pending QC code check ----
 
 export async function getPendingQcCode(moNumber: string, machineId: string) {
+  try {
+    await requireDevice()
+  } catch {
+    return null
+  }
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('qc_codes')

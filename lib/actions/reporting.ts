@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createServiceClient } from '@/lib/supabase/service'
+import { requireAdmin } from '@/lib/auth/guards'
 import { londonDayKey, firstShiftEndAtOrAfter, nextLondonMidnight } from '@/lib/tz'
 
 // ============================================================
@@ -209,6 +210,12 @@ function clampIntervalsToShift(
 // Returns all machines with their current active/paused session (if any)
 // Uses the same proven join pattern as getDashboardStats in admin.ts
 export async function getMachineStatusReport() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
 
   const { data: machines } = await supabase
@@ -259,6 +266,12 @@ export async function getMachineStatusReport() {
 
 // ---- Machine Current Live Status ----
 export async function getMachineCurrentStatus(machineId: string) {
+  try {
+    await requireAdmin()
+  } catch {
+    return null
+  }
+
   const supabase = createServiceClient()
 
   // Get machine info
@@ -327,6 +340,12 @@ export async function getMachineCurrentStatus(machineId: string) {
 
 // ---- Machine History (all sessions for a machine by its UUID) ----
 export async function getMachineHistory(machineId: string) {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
   const { data } = await supabase
     .from('sessions')
@@ -351,6 +370,12 @@ export async function getMachineHistory(machineId: string) {
 // ---- Machine Event Log ----
 // Returns all session_events for a machine's sessions — full event log
 export async function getMachineEventLog(machineId: string) {
+  try {
+    await requireAdmin()
+  } catch {
+    return { sessions: [], events: [] }
+  }
+
   const supabase = createServiceClient()
 
   // First get all session IDs for this machine
@@ -379,6 +404,12 @@ export async function getMachineEventLog(machineId: string) {
 // Blanket overview of every machine: total time spent in setup, number of
 // setups, current live status, and which machines are in setup right now.
 export async function getSetupTimeReport() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
 
   const { data: machines } = await supabase
@@ -485,6 +516,12 @@ export async function getSetupTimeReport() {
 
 // ---- Operator Time Report ----
 export async function getOperatorTimeReport() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
 
   const { data: users } = await supabase
@@ -549,6 +586,12 @@ export async function getOperatorTimeReport() {
 // Working time is attributed to the calendar day it happened on, so a session
 // that spans midnight is counted correctly across both days.
 export async function getOperatorDailyReport() {
+  try {
+    await requireAdmin()
+  } catch {
+    return []
+  }
+
   const supabase = createServiceClient()
 
   const { data: users } = await supabase
@@ -669,6 +712,12 @@ export async function getPassOffReport(filters?: {
   passedBy?: string
   result?: string
 }) {
+  try {
+    await requireAdmin()
+  } catch {
+    return { rows: [], machines: [], users: [] }
+  }
+
   const supabase = createServiceClient()
   const { from, to, mo, machineId, submittedBy, passedBy, result } = filters ?? {}
 
@@ -835,6 +884,12 @@ export async function getJobTimesReport(filters?: {
   mo?: string
   machineId?: string
 }) {
+  try {
+    await requireAdmin()
+  } catch {
+    return { rows: [], machines: [], cycleTableReady: false }
+  }
+
   const supabase = createServiceClient()
   const { from, to, mo, machineId } = filters ?? {}
 
@@ -989,7 +1044,8 @@ export async function getJobTimesReport(filters?: {
 
 // Write one of the two standards for a job, leaving the other untouched.
 // Passing nulls clears just that standard; the row is removed once neither
-// standard remains.
+// standard remains. Internal helper — not exported, so it is only reachable
+// through the guarded entry points below.
 async function saveStandard(
   moNumber: string,
   patch: Partial<{ cycle_seconds: number | null; quantity: number | null; setup_target_hours: number | null }>,
@@ -1037,6 +1093,12 @@ export async function saveMoCycleTime(
   cycleSeconds: number | null,
   quantity: number | null,
 ) {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false as const, error: 'Not authorised.' }
+  }
+
   if (cycleSeconds == null || quantity == null) {
     return saveStandard(moNumber, { cycle_seconds: null, quantity: null })
   }
@@ -1048,6 +1110,12 @@ export async function saveMoCycleTime(
 
 // Save (or clear) the target setup time for a job, in hours.
 export async function saveMoSetupTarget(moNumber: string, setupTargetHours: number | null) {
+  try {
+    await requireAdmin()
+  } catch {
+    return { ok: false as const, error: 'Not authorised.' }
+  }
+
   if (setupTargetHours == null) {
     return saveStandard(moNumber, { setup_target_hours: null })
   }
