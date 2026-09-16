@@ -2,7 +2,7 @@
 
 import { useRef, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
-import { Upload, Search, X, CheckCircle2, AlertCircle, History, RotateCcw } from 'lucide-react'
+import { Upload, Download, Search, X, CheckCircle2, AlertCircle, History, RotateCcw } from 'lucide-react'
 import { previewJobQuoteImport, confirmJobQuoteImport, reopenJob } from '@/lib/actions/job-costing'
 import type { ImportPreview, ImportRowResult } from '@/lib/job-costing/import'
 import { formatMoney, formatSecsAsHms } from '@/lib/job-costing/format'
@@ -122,6 +122,12 @@ export function JobQuotesClient({ quotes, imports }: { quotes: Quote[]; imports:
         >
           <History className="w-4 h-4" /> Import History
         </button>
+        <a
+          href="/api/admin/job-quotes-template"
+          className="h-10 px-4 rounded-lg border border-border text-sm font-medium hover:bg-muted transition-colors flex items-center gap-2"
+        >
+          <Download className="w-4 h-4" /> Download Template
+        </a>
         <input ref={fileInputRef} type="file" accept=".xlsx" onChange={handleFileChange} className="hidden" />
         <button
           onClick={() => fileInputRef.current?.click()}
