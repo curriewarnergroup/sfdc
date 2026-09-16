@@ -14,7 +14,7 @@ export default async function JobTimesPage({
   searchParams: Promise<{ from?: string; to?: string; mo?: string; machineId?: string }>
 }) {
   const sp = await searchParams
-  const { rows, machines, cycleTableReady } = await getJobTimesReport(sp)
+  const { rows, machines, cycleTableReady, rangeTooLarge, from, to } = await getJobTimesReport(sp)
 
   const totalSetup = rows.reduce((s, r) => s + r.setup_net_mins, 0)
   const totalRun = rows.reduce((s, r) => s + r.run_net_mins, 0)
@@ -87,7 +87,12 @@ export default async function JobTimesPage({
           </div>
         </div>
 
-        <JobTimesClient rows={rows} machines={machines} filters={sp} />
+        <JobTimesClient
+          rows={rows}
+          machines={machines}
+          filters={{ ...sp, from: sp.from ?? from, to: sp.to ?? to }}
+          rangeTooLarge={rangeTooLarge}
+        />
       </div>
     </ReportingShell>
   )

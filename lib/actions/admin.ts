@@ -2,6 +2,7 @@
 
 import { createServiceClient } from '@/lib/supabase/service'
 import { requireAdmin } from '@/lib/auth/guards'
+import { firstShiftEndAtOrAfter } from '@/lib/tz'
 import type { ActionResult, Session, ShopfloorUser, Machine, ShiftPattern, PauseReason } from '@/lib/types'
 
 // ---- Sessions ----
@@ -883,17 +884,39 @@ export async function runShiftCloseout(): Promise<ActionResult<{ closed: number 
 
   const supabase = createServiceClient()
 
-  // Only close sessions left ACTIVE (running) at shift end. PAUSED sessions are
-  // a deliberate hold — they must persist indefinitely until someone resumes or
-  // finishes them, even across multiple days — so they are never auto-closed.
+  // Only close sessions left ACTIVE (running) whose operator's shift has
+  // actually ended. PAUSED sessions are a deliberate hold — they must persist
+  // indefinitely until someone resumes or finishes them, even across multiple
+  // days — so they are never auto-closed here regardless of shift.
   const { data: staleSessions } = await supabase
     .from('sessions')
-    .select('id')
+    .select('id, started_at, user:shopfloor_users!user_id(shift:shift_patterns(name, end_time))')
     .eq('status', 'ACTIVE')
 
   if (!staleSessions?.length) return { ok: true, data: { closed: 0 } }
 
-  const ids = staleSessions.map((s) => s.id)
+  const now = Date.now()
+  const ids: string[] = []
+  const closedByShift = new Map<string, number>()
+
+  for (const s of staleSessions) {
+    const shift = (s.user as any)?.shift ?? null
+    const shiftName: string = shift?.name ?? 'Unassigned'
+
+    // No shift assigned — there is no boundary to wait for, so this is
+    // eligible for closeout on every run (matches the pre-existing behaviour
+    // for users without a shift pattern).
+    const boundary = shift?.end_time
+      ? firstShiftEndAtOrAfter(new Date(s.started_at).getTime(), shift.end_time)
+      : now
+
+    if (now >= boundary) {
+      ids.push(s.id)
+      closedByShift.set(shiftName, (closedByShift.get(shiftName) ?? 0) + 1)
+    }
+  }
+
+  if (ids.length === 0) return { ok: true, data: { closed: 0 } }
 
   const { error } = await supabase
     .from('sessions')
@@ -915,8 +938,12 @@ export async function runShiftCloseout(): Promise<ActionResult<{ closed: number 
     }))
   )
 
+  for (const [shiftName, count] of closedByShift) {
+    console.log(`[v0] Shift closeout: closed ${count} session(s) for shift "${shiftName}"`)
+  }
+
   return { ok: true, data: { closed: ids.length } }
-}
+  }
 
 // ---- Machines ----
 

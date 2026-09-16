@@ -138,8 +138,9 @@ async function fetchTimingEvents(
   const overrunAuthorised = new Set<string>()
   if (sessionIds.length === 0) return { events: bySession, overrunAuthorised }
 
-  // Chunk to stay within IN-clause limits on large datasets.
-  const chunkSize = 200
+  // Chunk to stay within IN-clause limits on large datasets — batches of
+  // session IDs rather than one large IN list.
+  const chunkSize = 500
   for (let i = 0; i < sessionIds.length; i += chunkSize) {
     const chunk = sessionIds.slice(i, i + chunkSize)
     const { data } = await supabase
@@ -878,6 +879,17 @@ export type JobTimeRow = {
   setup_efficiency_pct: number | null
 }
 
+// Hard cap on sessions considered per report — matches the previous
+// single-query `.limit()`. Now enforced via an upfront count check instead of
+// silently truncating: a range that would exceed it is rejected outright so
+// results are never a silent partial view of history.
+const JOB_TIMES_SESSION_CAP = 4000
+// Page size used to walk the result set in bounded chunks via `.range()`
+// instead of one unbounded fetch.
+const JOB_TIMES_PAGE_SIZE = 1000
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
 export async function getJobTimesReport(filters?: {
   from?: string
   to?: string
@@ -887,32 +899,20 @@ export async function getJobTimesReport(filters?: {
   try {
     await requireAdmin()
   } catch {
-    return { rows: [], machines: [], cycleTableReady: false }
+    return { rows: [], machines: [], cycleTableReady: false, rangeTooLarge: false }
   }
 
   const supabase = createServiceClient()
-  const { from, to, mo, machineId } = filters ?? {}
 
-  // 1. All SETUP + RUN sessions in scope, with the operator's shift so
-  //    post-shift time is clamped the same way as every other report.
-  let q = supabase
-    .from('sessions')
-    .select('id, mo_number, machine_id, session_type, status, started_at, ended_at, break_deducted_minutes, qty_made, machine:machines(machine_code), user:shopfloor_users!user_id(display_name, shift:shift_patterns(end_time))')
-    .in('session_type', ['SETUP', 'RUN'])
-    .order('started_at', { ascending: false })
-    .limit(4000)
-  if (from)      q = q.gte('started_at', from)
-  if (to)        q = q.lte('started_at', to + 'T23:59:59')
-  if (mo)        q = q.ilike('mo_number', `%${mo}%`)
-  if (machineId) q = q.eq('machine_id', machineId)
-  const { data: sessions } = await q
+  // A date range is required so the query can never silently hit the row
+  // cap — default to the last 30 days when the caller didn't specify one.
+  const to = filters?.to ?? londonDayKey(Date.now())
+  const from = filters?.from ?? londonDayKey(Date.now() - 30 * DAY_MS)
+  const { mo, machineId } = filters ?? {}
 
-  const list = (sessions ?? []).filter(s => s.mo_number)
-
-  // 2. Replay pause/resume events to split elapsed into worked vs paused.
-  const { events: eventsBySession, overrunAuthorised } = await fetchTimingEvents(
-    supabase,
-    list.map(s => s.id),
+  const { data: machines } = await supabase.from('machines').select('id, machine_code')
+  const sortedMachines = (machines ?? []).sort((a, b) =>
+    a.machine_code.localeCompare(b.machine_code, undefined, { numeric: true, sensitivity: 'base' })
   )
 
   // 3. Recorded standards. The table is applied by migration 007 — if it
@@ -929,6 +929,57 @@ export async function getJobTimesReport(filters?: {
       setup_target_hours: c.setup_target_hours == null ? null : Number(c.setup_target_hours),
     })
   }
+
+  // Shared filter builder for both the count check and the paginated fetch.
+  function applyFilters<T>(query: T): T {
+    let q = query as any
+    q = q.in('session_type', ['SETUP', 'RUN'])
+    q = q.gte('started_at', from)
+    q = q.lte('started_at', to + 'T23:59:59')
+    if (mo)        q = q.ilike('mo_number', `%${mo}%`)
+    if (machineId) q = q.eq('machine_id', machineId)
+    return q
+  }
+
+  // 1. Count first so a range that would exceed the cap is rejected outright
+  //    instead of silently truncating history.
+  const { count } = await applyFilters(
+    supabase.from('sessions').select('id', { count: 'exact', head: true }),
+  )
+
+  if ((count ?? 0) > JOB_TIMES_SESSION_CAP) {
+    return {
+      rows: [],
+      machines: sortedMachines,
+      cycleTableReady: cycles != null,
+      rangeTooLarge: true,
+      from,
+      to,
+    }
+  }
+
+  // 2. Page through all SETUP + RUN sessions in scope, with the operator's
+  //    shift so post-shift time is clamped the same way as every other
+  //    report. Paginated via `.range()` instead of one unbounded fetch.
+  const sessions: any[] = []
+  for (let offset = 0; offset < (count ?? 0); offset += JOB_TIMES_PAGE_SIZE) {
+    const { data: page } = await applyFilters(
+      supabase
+        .from('sessions')
+        .select('id, mo_number, machine_id, session_type, status, started_at, ended_at, break_deducted_minutes, qty_made, machine:machines(machine_code), user:shopfloor_users!user_id(display_name, shift:shift_patterns(end_time))')
+        .order('started_at', { ascending: false }),
+    ).range(offset, offset + JOB_TIMES_PAGE_SIZE - 1)
+    if (page) sessions.push(...page)
+  }
+
+  const list = sessions.filter(s => s.mo_number)
+
+  // Replay pause/resume events (fetched in batches internally) to split
+  // elapsed into worked vs paused.
+  const { events: eventsBySession, overrunAuthorised } = await fetchTimingEvents(
+    supabase,
+    list.map(s => s.id),
+  )
 
   // 4. Aggregate per MO.
   type Agg = Omit<JobTimeRow, 'machine_codes' | 'operators' | 'cycle_seconds' | 'quantity' | 'expected_mins' | 'efficiency_pct' | 'setup_target_hours' | 'setup_expected_mins' | 'setup_efficiency_pct'> & {
@@ -1034,12 +1085,7 @@ export async function getJobTimesReport(filters?: {
     })
     .sort((a, b) => new Date(b.last_activity).getTime() - new Date(a.last_activity).getTime())
 
-  const { data: machines } = await supabase.from('machines').select('id, machine_code')
-  const sortedMachines = (machines ?? []).sort((a, b) =>
-    a.machine_code.localeCompare(b.machine_code, undefined, { numeric: true, sensitivity: 'base' })
-  )
-
-  return { rows, machines: sortedMachines, cycleTableReady: cycles != null }
+  return { rows, machines: sortedMachines, cycleTableReady: cycles != null, rangeTooLarge: false, from, to }
 }
 
 // Write one of the two standards for a job, leaving the other untouched.

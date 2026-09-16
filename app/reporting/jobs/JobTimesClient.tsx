@@ -246,10 +246,12 @@ export function JobTimesClient({
   rows,
   machines,
   filters,
+  rangeTooLarge,
 }: {
   rows: JobTimeRow[]
   machines: Machine[]
   filters: { from?: string; to?: string; mo?: string; machineId?: string }
+  rangeTooLarge?: boolean
 }) {
   const router = useRouter()
   const params = useSearchParams()
@@ -265,6 +267,16 @@ export function JobTimesClient({
 
   return (
     <div className="space-y-4">
+      {rangeTooLarge && (
+        <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-5 py-4 print:hidden">
+          <p className="text-sm font-semibold text-red-400">Date range too large</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            This range contains too many sessions to report on at once. Narrow the From/To dates or filter by
+            machine or MO number, then try again.
+          </p>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="bg-card rounded-xl border border-border p-4 print:hidden">
         <div className="flex flex-wrap items-end gap-3">
