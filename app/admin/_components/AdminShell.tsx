@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { adminSignOut } from '@/lib/actions/admin'
 import {
   LayoutDashboard, Users, Cpu, Clock, PauseCircle,
-  ClipboardList, Settings, LogOut, Monitor, BarChart2, ClipboardCheck, ShieldCheck,
+  ClipboardList, Settings, LogOut, Monitor, BarChart2, ClipboardCheck, ShieldCheck, FileSpreadsheet,
 } from 'lucide-react'
 import { useTransition } from 'react'
 
@@ -19,6 +19,7 @@ const NAV = [
   { href: '/admin/shifts',       label: 'Shifts',        icon: Clock           },
   { href: '/admin/pause-reasons',label: 'Pause Reasons', icon: PauseCircle     },
   { href: '/admin/qc',           label: 'QC Checks',     icon: ClipboardCheck  },
+  { href: '/admin/job-quotes',   label: 'Job Quotes',    icon: FileSpreadsheet },
   { href: '/admin/audit',        label: 'Audit Log',     icon: Settings        },
   { href: '/reporting/login',    label: 'Reporting',     icon: BarChart2       },
 ]
