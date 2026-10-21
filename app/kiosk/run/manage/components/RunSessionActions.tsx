@@ -2,12 +2,12 @@
 
 import { useState, useTransition, useRef } from 'react'
 import type { Session, PauseReason } from '@/lib/types'
-import { pauseSession, resumeSession, finishRunSession, authoriseUnmannedRun, convertToMannedRun, supervisorPauseUnmannedSession, supervisorResumeUnmannedSession, signOffJob } from '@/lib/actions/sessions'
+import { pauseSession, resumeSession, authoriseUnmannedRun, convertToMannedRun, supervisorPauseUnmannedSession, supervisorResumeUnmannedSession, signOffJob } from '@/lib/actions/sessions'
 import { ScanInput, type ScanInputHandle } from '@/components/kiosk/ScanInput'
 import { BigButton } from '@/components/kiosk/BigButton'
 import { ReasonPicker } from '@/app/kiosk/setup/manage/components/ReasonPicker'
 
-type ActionView = 'choose' | 'pause' | 'finish' | 'go-unmanned' | 'go-manned' | 'supervisor-pause' | 'supervisor-resume' | 'sign-off' | 'success'
+type ActionView = 'choose' | 'pause' | 'go-unmanned' | 'go-manned' | 'supervisor-pause' | 'supervisor-resume' | 'sign-off' | 'success'
 
 interface RunSessionActionsProps {
   session: Session
@@ -28,9 +28,7 @@ export function RunSessionActions({
   const [successMsg, setSuccessMsg] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
   const [selectedReasonId, setSelectedReasonId] = useState<string | null>(null)
-  const [qcCode, setQcCode] = useState('')
   const [pending, startTransition] = useTransition()
-  const qcRef = useRef<ScanInputHandle>(null)
 
   const isPaused = session.status === 'PAUSED'
   const isUnmanned = session.session_type === 'UNMANNED'
@@ -168,29 +166,6 @@ export function RunSessionActions({
         setView('success')
       } else {
         setErrorMsg(res.error ?? 'Failed to resume session.')
-      }
-    })
-  }
-
-  // ── FINISH (LAST_OFF) ──────────────────────────────────────────────────
-  function handleFinish() {
-    if (!qcCode.trim()) {
-      setErrorMsg('Please scan or enter the Last-Off QC code.')
-      return
-    }
-    clearError()
-    startTransition(async () => {
-      const res = await finishRunSession({
-        sessionId: session.id,
-        actorUserCode,
-        deviceId,
-        qcCode: qcCode.trim(),
-      })
-      if (res.ok) {
-        setSuccessMsg('Run complete. Last-off recorded.')
-        setView('success')
-      } else {
-        setErrorMsg(res.error ?? 'Failed to finish run.')
       }
     })
   }
@@ -424,41 +399,6 @@ export function RunSessionActions({
     )
   }
 
-  // ── Finish view ────────────────────────────────────────────────────────
-  if (view === 'finish') {
-    return (
-      <div className="flex flex-col gap-5">
-        <SectionHeader title="Finish Run" onBack={() => { setView('choose'); clearError() }} />
-        <p className="text-sm text-muted-foreground">
-          Scan or enter the{' '}
-          <strong className="text-foreground">Last-Off QC code</strong> issued by
-          QC to close this run.
-        </p>
-        <ScanInput
-          ref={qcRef}
-          label="Last-Off QC Code"
-          value={qcCode}
-          onChange={setQcCode}
-          onConfirm={handleFinish}
-          placeholder="Scan or type code…"
-          autoFocus
-          disabled={pending}
-          hint="8-character code issued by QC — expires in 30 min, bound to this MO + machine"
-        />
-        {ErrorBanner}
-        <BigButton
-          variant="success"
-          loading={pending}
-          disabled={!qcCode.trim()}
-          onClick={handleFinish}
-          className="w-full"
-        >
-          Finish Run
-        </BigButton>
-      </div>
-    )
-  }
-
   // ── Choose view ────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-4">
@@ -595,22 +535,9 @@ export function RunSessionActions({
         </BigButton>
       )}
 
-      {/* Finish — requires LAST_OFF code */}
-      <BigButton
-        variant="danger"
-        onClick={() => { clearError(); setView('finish') }}
-        sublabel="Requires Last-Off QC code"
-        className="w-full"
-        icon={
-          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-            <line x1="9" y1="9" x2="15" y2="15" />
-            <line x1="15" y1="9" x2="9" y2="15" />
-          </svg>
-        }
-      >
-        Finish Run
-      </BigButton>
+      <p className="px-4 py-3 rounded-xl bg-muted/40 border border-border text-xs text-muted-foreground">
+        When the run is complete, ask QC for the last-off. Once QC passes it, this job ends automatically.
+      </p>
     </div>
   )
 }
