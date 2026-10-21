@@ -10,13 +10,12 @@ function fmtHours(mins: number) {
 }
 
 export default async function SetupTimeReportPage() {
-  const machines = await getSetupTimeReport()
+  const { rows, idleCount } = await getSetupTimeReport()
 
-  const inSetupNow = machines.filter(m => m.in_setup).length
-  const totalSetupMinutes = machines.reduce((s, m) => s + m.total_setup_minutes, 0)
-  const totalWorkingMinutes = machines.reduce((s, m) => s + m.net_setup_minutes, 0)
-  const totalPausedMinutes = machines.reduce((s, m) => s + m.paused_setup_minutes, 0)
-  const totalSetups = machines.reduce((s, m) => s + m.setup_count, 0)
+  const inSetupNow = rows.filter(m => m.in_setup).length
+  const totalSetupMinutes = rows.reduce((s, m) => s + m.total_setup_minutes, 0)
+  const totalWorkingMinutes = rows.reduce((s, m) => s + m.net_setup_minutes, 0)
+  const totalPausedMinutes = rows.reduce((s, m) => s + m.paused_setup_minutes, 0)
 
   return (
     <ReportingShell>
@@ -25,7 +24,7 @@ export default async function SetupTimeReportPage() {
         <div>
           <h1 className="text-xl font-bold text-foreground tracking-tight">Setup Time</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Setup time per machine and who&apos;s in setup right now — click a machine to drill into its actions
+            Setup time for the job (MO) currently on each machine
           </p>
         </div>
         <div className="flex items-center gap-2 text-sm">
@@ -35,8 +34,7 @@ export default async function SetupTimeReportPage() {
       </div>
 
       <div className="p-8 space-y-6">
-        {/* Summary stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-card rounded-xl border border-border p-5">
             <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">In Setup Now</p>
             <p className="text-3xl font-bold text-foreground mt-1">{inSetupNow}</p>
@@ -44,7 +42,7 @@ export default async function SetupTimeReportPage() {
           <div className="bg-card rounded-xl border border-border p-5">
             <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Total Time</p>
             <p className="text-3xl font-bold text-foreground mt-1">{fmtHours(totalSetupMinutes)}h</p>
-            <p className="text-xs text-muted-foreground mt-1">Elapsed incl. pauses</p>
+            <p className="text-xs text-muted-foreground mt-1">Since setup began, incl. pauses</p>
           </div>
           <div className="bg-card rounded-xl border border-border p-5">
             <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Working Time</p>
@@ -55,14 +53,15 @@ export default async function SetupTimeReportPage() {
             <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Paused Time</p>
             <p className="text-3xl font-bold text-status-paused mt-1">{fmtHours(totalPausedMinutes)}h</p>
           </div>
-          <div className="bg-card rounded-xl border border-border p-5">
-            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Total Setups</p>
-            <p className="text-3xl font-bold text-foreground mt-1">{totalSetups}</p>
-          </div>
         </div>
 
-        {/* Grid */}
-        <SetupTimeGrid machines={machines} />
+        <SetupTimeGrid machines={rows} />
+
+        {idleCount > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {idleCount} idle {idleCount === 1 ? 'machine has' : 'machines have'} no current job and {idleCount === 1 ? 'is' : 'are'} not shown.
+          </p>
+        )}
       </div>
     </ReportingShell>
   )

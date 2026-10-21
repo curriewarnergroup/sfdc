@@ -1194,18 +1194,62 @@ export async function getDashboardStats() {
   const supabase = createServiceClient()
   const now = Date.now()
 
-  const [{ data: activeSessions }, { data: recentAudit }] = await Promise.all([
+  const sevenDaysAgoIso = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()
+  const sessionSelect =
+    '*, machine:machines(*), user:shopfloor_users!user_id(*), device:devices(*), authoriser:shopfloor_users!authorised_by(*)'
+
+  const [{ data: activeSessions }, { data: recentSessions }] = await Promise.all([
     supabase
       .from('sessions')
-    .select('*, machine:machines(*), user:shopfloor_users!user_id(*), device:devices(*), authoriser:shopfloor_users!authorised_by(*)')
+      .select(sessionSelect)
       .in('status', ['ACTIVE', 'PAUSED'])
       .order('started_at', { ascending: false }),
+    // Anything still open, or that ended within the last 7 days.
     supabase
-      .from('audit_log')
-      .select('*, actor_user:shopfloor_users(display_name), device:devices(station_name)')
-      .order('occurred_at', { ascending: false })
-      .limit(20),
+      .from('sessions')
+      .select(sessionSelect)
+      .or(`ended_at.is.null,ended_at.gte.${sevenDaysAgoIso}`)
+      .order('started_at', { ascending: false }),
   ])
+
+  // One entry per machine: its most recent activity in the last 7 days.
+  const byMachine = new Map<string, {
+    machine_id: string
+    machine_code: string
+    description: string | null
+    last_activity_at: string
+    last_session: Session
+    live: boolean
+    session_count: number
+  }>()
+  for (const s of (recentSessions ?? []) as Session[]) {
+    const live = s.status === 'ACTIVE' || s.status === 'PAUSED'
+    const lastActivity = live ? new Date(now).toISOString() : (s.ended_at ?? s.started_at)
+    const key = s.machine_id
+    const existing = byMachine.get(key)
+    if (!existing) {
+      byMachine.set(key, {
+        machine_id: key,
+        machine_code: s.machine?.machine_code ?? 'Unknown',
+        description: s.machine?.description ?? null,
+        last_activity_at: lastActivity,
+        last_session: s,
+        live,
+        session_count: 1,
+      })
+      continue
+    }
+    existing.session_count += 1
+    existing.live = existing.live || live
+    if (lastActivity > existing.last_activity_at) {
+      existing.last_activity_at = lastActivity
+      existing.last_session = s
+    }
+  }
+  const machineActivity = [...byMachine.values()].sort((a, b) => {
+    if (a.live !== b.live) return a.live ? -1 : 1
+    return a.last_activity_at < b.last_activity_at ? 1 : -1
+  })
 
   const sessions = (activeSessions ?? []) as Session[]
   const longRunning = sessions.filter(s => {
@@ -1220,7 +1264,7 @@ export async function getDashboardStats() {
     longRunning,
     pausedSessions: paused,
     unmannedSessions: unmanned,
-    recentAudit: recentAudit ?? [],
+    machineActivity,
   }
 }
 
