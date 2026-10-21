@@ -14,6 +14,8 @@ type Session = {
   qty_scrapped: number | null
   user: { display_name: string; role: string } | null
   pause_reason_label: string | null
+  activity_started_at: string
+  activity_minutes: number
 }
 
 type MachineRow = {
@@ -31,11 +33,27 @@ function statusLabel(session: Session | null): { label: string; cls: string } {
   return { label: 'Running', cls: 'bg-status-running/20 text-status-running' }
 }
 
-function elapsed(startedAt: string) {
-  const ms = Date.now() - new Date(startedAt).getTime()
-  const h = Math.floor(ms / 3600000)
-  const m = Math.floor((ms % 3600000) / 60000)
+function activityText(session: Session): string {
+  if (session.status === 'PAUSED') {
+    return session.pause_reason_label ? `Paused: ${session.pause_reason_label}` : 'Paused'
+  }
+  if (session.session_type === 'SETUP') return 'Setting up'
+  if (session.session_type === 'UNMANNED') return 'Unmanned run'
+  return 'Running job'
+}
+
+function fmtMinutes(mins: number) {
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
   return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
+
+function sinceTime(iso: string) {
+  return new Date(iso).toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Europe/London',
+  })
 }
 
 function QtyBar({ made, total, scrapped }: { made: number | null; total: number | null; scrapped?: number | null }) {
@@ -67,7 +85,7 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
       <table className="w-full text-sm">
         <thead className="bg-muted/50 border-b border-border">
           <tr>
-            {['Machine', 'Status', 'Operator', 'MO Number', 'Elapsed', 'Progress', ''].map(h => (
+            {['Machine', 'Status', 'Current Activity', 'Operator', 'MO Number', 'Time in Activity', 'Progress', ''].map(h => (
               <th key={h} className="text-left text-xs font-semibold uppercase tracking-widest text-muted-foreground px-4 py-3">{h}</th>
             ))}
           </tr>
@@ -91,16 +109,15 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
                 </td>
                 {/* Status */}
                 <td className="px-4 py-3">
-                  <div className="flex flex-col gap-1">
-                    <span className={`text-[11px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded w-fit ${cls}`}>
-                      {label}
-                    </span>
-                    {m.session?.status === 'PAUSED' && m.session.pause_reason_label && (
-                      <span className="text-[11px] text-muted-foreground truncate max-w-[140px]">
-                        {m.session.pause_reason_label}
-                      </span>
-                    )}
-                  </div>
+                  <span className={`text-[11px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded w-fit inline-block ${cls}`}>
+                    {label}
+                  </span>
+                </td>
+                {/* Current activity */}
+                <td className="px-4 py-3">
+                  {m.session
+                    ? <span className="text-foreground">{activityText(m.session)}</span>
+                    : <span className="text-muted-foreground">—</span>}
                 </td>
                 {/* Operator */}
                 <td className="px-4 py-3">
@@ -118,11 +135,19 @@ export function MachineStatusGrid({ machines }: { machines: MachineRow[] }) {
                     ? <span className="font-mono font-semibold text-foreground">{m.session.mo_number}</span>
                     : <span className="text-muted-foreground">—</span>}
                 </td>
-                {/* Elapsed */}
+                {/* Time in current activity */}
                 <td className="px-4 py-3">
-                  {m.session
-                    ? <div className="flex items-center gap-1.5 text-foreground font-mono"><Clock className="w-3.5 h-3.5 text-muted-foreground" />{elapsed(m.session.started_at)}</div>
-                    : <span className="text-muted-foreground">—</span>}
+                  {m.session ? (
+                    <div className="flex flex-col">
+                      <div className="flex items-center gap-1.5 text-foreground font-mono font-semibold">
+                        <Clock className="w-3.5 h-3.5 text-muted-foreground" />
+                        {fmtMinutes(m.session.activity_minutes)}
+                      </div>
+                      <span className="text-[11px] text-muted-foreground pl-5">
+                        since {sinceTime(m.session.activity_started_at)}
+                      </span>
+                    </div>
+                  ) : <span className="text-muted-foreground">—</span>}
                 </td>
                 {/* Progress */}
                 <td className="px-4 py-3 min-w-[140px]">

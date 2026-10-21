@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createServiceClient } from '@/lib/supabase/service'
-import { londonDayKey, firstShiftEndAtOrAfter, nextLondonMidnight } from '@/lib/tz'
+import { londonDayKey, firstShiftEndAtOrAfter, nextLondonMidnight, londonWallClockToMs } from '@/lib/tz'
 
 // ============================================================
 // Pause-aware timing engine
@@ -224,37 +224,80 @@ export async function getMachineStatusReport() {
     .select('*, machine:machines(*), user:shopfloor_users!user_id(*), authoriser:shopfloor_users!authorised_by(*)')
     .in('status', ['ACTIVE', 'PAUSED'])
 
-  // For paused sessions, get the most recent pause event's reason
-  const pausedIds = (activeSessions ?? []).filter(s => s.status === 'PAUSED').map(s => s.id)
-  const pauseReasonMap = new Map<string, string>()
-  if (pausedIds.length > 0) {
-    const { data: pauseEvents } = await supabase
+  // The latest state-changing event per live session tells us what the
+  // machine is doing right now (running / paused + why) and since when.
+  // The shift-overrun marker is stored as a RESUME event but is not a real
+  // state change, so it is ignored here.
+  const liveIds = (activeSessions ?? []).map(s => s.id)
+  const lastEventBySession = new Map<string, { type: string; at: string; reason: string | null }>()
+  const lastPauseReasonBySession = new Map<string, string>()
+  const chunkSize = 200
+  for (let i = 0; i < liveIds.length; i += chunkSize) {
+    const { data: events } = await supabase
       .from('session_events')
-      .select('session_id, pause_reason:pause_reasons(label)')
-      .eq('event_type', 'SESSION_PAUSE')
-      .in('session_id', pausedIds)
+      .select('session_id, event_type, occurred_at, metadata, pause_reason:pause_reasons(label)')
+      .in('session_id', liveIds.slice(i, i + chunkSize))
+      .in('event_type', ['SESSION_START', 'SESSION_PAUSE', 'SESSION_RESUME'])
       .order('occurred_at', { ascending: false })
-    for (const ev of pauseEvents ?? []) {
-      if (!pauseReasonMap.has(ev.session_id) && (ev.pause_reason as any)?.label) {
-        pauseReasonMap.set(ev.session_id, (ev.pause_reason as any).label)
+    for (const ev of events ?? []) {
+      if ((ev.metadata as any)?.overrun_authorised) continue
+      const reason = (ev.pause_reason as any)?.label ?? null
+      if (!lastEventBySession.has(ev.session_id)) {
+        lastEventBySession.set(ev.session_id, {
+          type: ev.event_type as string,
+          at: ev.occurred_at as string,
+          reason,
+        })
+      }
+      if (ev.event_type === 'SESSION_PAUSE' && reason && !lastPauseReasonBySession.has(ev.session_id)) {
+        lastPauseReasonBySession.set(ev.session_id, reason)
       }
     }
   }
 
-  const sessionsByMachine = new Map((activeSessions ?? []).map(s => [s.machine_id, s]))
+  // One live session represents each machine. Multi-setup machines can carry
+  // several; prefer a running one, then the most recently started.
+  const sessionsByMachine = new Map<string, any>()
+  for (const s of activeSessions ?? []) {
+    const cur = sessionsByMachine.get(s.machine_id)
+    const better =
+      !cur ||
+      (cur.status === 'PAUSED' && s.status === 'ACTIVE') ||
+      (cur.status === s.status && new Date(s.started_at) > new Date(cur.started_at))
+    if (better) sessionsByMachine.set(s.machine_id, s)
+  }
 
   // Natural sort: BH1, BH2, BH3 ... BH10 not BH1, BH10, BH2
   const sorted = [...machines].sort((a, b) =>
     a.machine_code.localeCompare(b.machine_code, undefined, { numeric: true, sensitivity: 'base' })
   )
 
-  return sorted.map(m => {
+  const now = Date.now()
+  const rows = sorted.map(m => {
     const session = sessionsByMachine.get(m.id) ?? null
+    if (!session) return { ...m, session: null }
+    const last = lastEventBySession.get(session.id)
+    const activityStartedAt = last?.at ?? (session.started_at as string)
     return {
       ...m,
-      session: session ? { ...session, pause_reason_label: pauseReasonMap.get(session.id) ?? null } : null,
+      session: {
+        ...session,
+        pause_reason_label:
+          session.status === 'PAUSED' ? (last?.reason ?? lastPauseReasonBySession.get(session.id) ?? null) : null,
+        activity_started_at: activityStartedAt,
+        activity_minutes: Math.max(0, Math.floor((now - new Date(activityStartedAt).getTime()) / 60000)),
+      },
     }
   })
+
+  // Machines with work in progress float to the top: running first, then
+  // paused, then idle. Natural machine order is preserved within each group.
+  const rank = (r: (typeof rows)[number]) =>
+    !r.session ? 2 : r.session.status === 'PAUSED' ? 1 : 0
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => rank(a.r) - rank(b.r) || a.i - b.i)
+    .map(x => x.r)
 }
 
 // ---- Machine Current Live Status ----
@@ -376,8 +419,9 @@ export async function getMachineEventLog(machineId: string) {
 }
 
 // ---- Setup Time Report ----
-// Blanket overview of every machine: total time spent in setup, number of
-// setups, current live status, and which machines are in setup right now.
+// One row per machine that currently has a job (MO) on it. Setup time is
+// scoped to that MO on that machine only: total time since its setup began,
+// time actually worked, and time paused (with a breakdown by reason).
 export async function getSetupTimeReport() {
   const supabase = createServiceClient()
 
@@ -386,40 +430,58 @@ export async function getSetupTimeReport() {
     .select('id, machine_code, description, is_active')
     .eq('is_active', true)
 
-  if (!machines) return []
+  if (!machines) return { rows: [], idleCount: 0 }
 
-  // Every SETUP session (any status) — used to total setup time per machine.
-  // Join the operator's shift so setup time worked past shift end is excluded.
-  const { data: setupSessions } = await supabase
-    .from('sessions')
-    .select('id, machine_id, status, started_at, ended_at, break_deducted_minutes, user:shopfloor_users!user_id(shift:shift_patterns(end_time))')
-    .eq('session_type', 'SETUP')
-
-  // All currently live sessions (any type) to determine each machine's status
+  // All currently live sessions (any type) define each machine's current job.
   const { data: liveSessions } = await supabase
     .from('sessions')
     .select('id, machine_id, session_type, status, mo_number, started_at, user:shopfloor_users!user_id(display_name, role)')
     .in('status', ['ACTIVE', 'PAUSED'])
 
-  const liveByMachine = new Map((liveSessions ?? []).map(s => [s.machine_id, s]))
+  // One live session represents each machine (multi-setup machines can carry
+  // several): prefer a running one, then the most recently started.
+  const liveByMachine = new Map<string, any>()
+  for (const s of liveSessions ?? []) {
+    const cur = liveByMachine.get(s.machine_id)
+    const better =
+      !cur ||
+      (cur.status === 'PAUSED' && s.status === 'ACTIVE') ||
+      (cur.status === s.status && new Date(s.started_at) > new Date(cur.started_at))
+    if (better) liveByMachine.set(s.machine_id, s)
+  }
+
+  const currentMos = [...new Set([...liveByMachine.values()].map(s => s.mo_number as string))]
+
+  // Every SETUP session for the MOs currently on machines. Join the operator's
+  // shift so setup time worked past shift end is excluded.
+  let setupSessions: any[] = []
+  if (currentMos.length > 0) {
+    const { data } = await supabase
+      .from('sessions')
+      .select('id, machine_id, mo_number, status, started_at, ended_at, break_deducted_minutes, user:shopfloor_users!user_id(shift:shift_patterns(end_time))')
+      .eq('session_type', 'SETUP')
+      .in('mo_number', currentMos)
+    setupSessions = data ?? []
+  }
 
   // Replay pause/resume events so setup time is split into worked vs paused.
   const { events: eventsBySession, overrunAuthorised } = await fetchTimingEvents(
     supabase,
-    (setupSessions ?? []).map(s => s.id),
+    setupSessions.map(s => s.id),
   )
 
-  // Aggregate per machine: total (incl pauses), working, paused, reason breakdown.
+  // Aggregate per machine + MO: total (incl pauses), working, paused, reasons.
   type Agg = {
     totalMinutes: number
     netMinutes: number
     pausedMinutes: number
     count: number
-    lastSetup: string | null
     pauseByReason: Record<string, number> // label -> minutes
   }
-  const setupAgg = new Map<string, Agg>()
-  for (const s of setupSessions ?? []) {
+  const setupAgg = new Map<string, Agg>() // key: machine_id|mo_number
+  for (const s of setupSessions) {
+    const live = liveByMachine.get(s.machine_id)
+    if (!live || live.mo_number !== s.mo_number) continue
     const t = computeSessionTiming(
       s.started_at,
       s.ended_at,
@@ -431,8 +493,9 @@ export async function getSetupTimeReport() {
         overrunAuthorised: overrunAuthorised.has(s.id),
       },
     )
-    const cur = setupAgg.get(s.machine_id) ?? {
-      totalMinutes: 0, netMinutes: 0, pausedMinutes: 0, count: 0, lastSetup: null, pauseByReason: {},
+    const key = `${s.machine_id}|${s.mo_number}`
+    const cur = setupAgg.get(key) ?? {
+      totalMinutes: 0, netMinutes: 0, pausedMinutes: 0, count: 0, pauseByReason: {},
     }
     cur.totalMinutes += t.totalMs / 60000
     cur.netMinutes += t.netMs / 60000
@@ -441,106 +504,51 @@ export async function getSetupTimeReport() {
     for (const [label, ms] of Object.entries(t.pauseByReason)) {
       cur.pauseByReason[label] = (cur.pauseByReason[label] ?? 0) + ms / 60000
     }
-    if (!cur.lastSetup || new Date(s.started_at) > new Date(cur.lastSetup)) cur.lastSetup = s.started_at
-    setupAgg.set(s.machine_id, cur)
+    setupAgg.set(key, cur)
   }
 
   const sorted = [...machines].sort((a, b) =>
     a.machine_code.localeCompare(b.machine_code, undefined, { numeric: true, sensitivity: 'base' })
   )
 
-  return sorted.map(m => {
-    const agg = setupAgg.get(m.id) ?? {
-      totalMinutes: 0, netMinutes: 0, pausedMinutes: 0, count: 0, lastSetup: null, pauseByReason: {},
-    }
-    const live = liveByMachine.get(m.id) ?? null
-    const inSetup = !!live && live.session_type === 'SETUP'
-    const pauseBreakdown = Object.entries(agg.pauseByReason)
-      .map(([label, minutes]) => ({ label, minutes: Math.round(minutes) }))
-      .filter(r => r.minutes > 0)
-      .sort((a, b) => b.minutes - a.minutes)
-    return {
-      id: m.id,
-      machine_code: m.machine_code,
-      description: m.description as string | null,
-      total_setup_minutes: Math.round(agg.totalMinutes),
-      net_setup_minutes: Math.round(agg.netMinutes),
-      paused_setup_minutes: Math.round(agg.pausedMinutes),
-      pause_breakdown: pauseBreakdown,
-      setup_count: agg.count,
-      last_setup: agg.lastSetup,
-      in_setup: inSetup,
-      current: live
-        ? {
-            session_type: live.session_type as string,
-            status: live.status as string,
-            mo_number: live.mo_number as string,
-            started_at: live.started_at as string,
-            operator: (live.user as any)?.display_name ?? null,
-          }
-        : null,
-    }
-  })
-}
-
-// ---- Operator Time Report ----
-export async function getOperatorTimeReport() {
-  const supabase = createServiceClient()
-
-  const { data: users } = await supabase
-    .from('shopfloor_users')
-    .select('id, display_name, role, is_active')
-    .in('role', ['OPERATOR', 'SETTER', 'SUPERVISOR'])
-    .order('display_name')
-
-  if (!users) return []
-
-  // Get all sessions (finished, auto-closed, AND active) grouped by user.
-  // Join each operator's shift so post-shift time is excluded from worked hours.
-  const { data: sessions } = await supabase
-    .from('sessions')
-    .select('id, user_id, started_at, ended_at, break_deducted_minutes, status, user:shopfloor_users!user_id(shift:shift_patterns(end_time))')
-    .not('session_type', 'eq', 'UNMANNED')
-
-  // Replay pauses so "hours worked" is time actually working, not wall-clock.
-  const { events: eventsBySession, overrunAuthorised } = await fetchTimingEvents(
-    supabase,
-    (sessions ?? []).map(s => s.id),
-  )
-
-  const sessionsByUser = new Map<string, typeof sessions>()
-  for (const s of sessions ?? []) {
-    if (!sessionsByUser.has(s.user_id)) sessionsByUser.set(s.user_id, [])
-    sessionsByUser.get(s.user_id)!.push(s)
-  }
-
-  return users.map(u => {
-    const userSessions = sessionsByUser.get(u.id) ?? []
-    let netMinutes = 0
-    let totalMinutes = 0
-    for (const s of userSessions) {
-      const t = computeSessionTiming(
-        s.started_at,
-        s.ended_at,
-        s.break_deducted_minutes ?? 0,
-        eventsBySession.get(s.id) ?? [],
-        {
-          endTime: (s.user as any)?.shift?.end_time ?? null,
-          startMs: new Date(s.started_at).getTime(),
-          overrunAuthorised: overrunAuthorised.has(s.id),
+  const rows = sorted
+    .filter(m => liveByMachine.has(m.id))
+    .map(m => {
+      const live = liveByMachine.get(m.id)
+      const agg = setupAgg.get(`${m.id}|${live.mo_number}`) ?? {
+        totalMinutes: 0, netMinutes: 0, pausedMinutes: 0, count: 0, pauseByReason: {},
+      }
+      const pauseBreakdown = Object.entries(agg.pauseByReason)
+        .map(([label, minutes]) => ({ label, minutes: Math.round(minutes) }))
+        .filter(r => r.minutes > 0)
+        .sort((a, b) => b.minutes - a.minutes)
+      return {
+        id: m.id,
+        machine_code: m.machine_code,
+        description: m.description as string | null,
+        mo_number: live.mo_number as string,
+        total_setup_minutes: Math.round(agg.totalMinutes),
+        net_setup_minutes: Math.round(agg.netMinutes),
+        paused_setup_minutes: Math.round(agg.pausedMinutes),
+        pause_breakdown: pauseBreakdown,
+        setup_count: agg.count,
+        in_setup: live.session_type === 'SETUP',
+        current: {
+          session_type: live.session_type as string,
+          status: live.status as string,
+          mo_number: live.mo_number as string,
+          started_at: live.started_at as string,
+          operator: (live.user as any)?.display_name ?? null,
         },
-      )
-      netMinutes += t.netMs / 60000
-      totalMinutes += t.totalMs / 60000
-    }
-    return {
-      ...u,
-      session_count: userSessions.length,
-      hours_worked: Math.round((netMinutes / 60) * 10) / 10,
-      hours_elapsed: Math.round((totalMinutes / 60) * 10) / 10,
-      hours_produced: null as number | null,
-    }
-  })
+      }
+    })
+
+  // Machines in setup right now first, then running, then paused.
+  const rank = (r: (typeof rows)[number]) =>
+    r.in_setup ? 0 : r.current.status === 'ACTIVE' ? 1 : 2
+  rows.sort((a, b) => rank(a) - rank(b))
+
+  return { rows, idleCount: machines.length - rows.length }
 }
 
 // ---- Operator Daily Work Breakdown ----
@@ -548,8 +556,13 @@ export async function getOperatorTimeReport() {
 // excluded) and exactly where — which machine + MO — they spent that time.
 // Working time is attributed to the calendar day it happened on, so a session
 // that spans midnight is counted correctly across both days.
-export async function getOperatorDailyReport() {
+// People, days and entries are all ordered by most recent work first. `from` /
+// `to` (YYYY-MM-DD, London days, inclusive) limit the report to that window.
+export async function getOperatorDailyReport(filters?: { from?: string; to?: string }) {
   const supabase = createServiceClient()
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/
+  const from = filters?.from && dateRe.test(filters.from) ? filters.from : undefined
+  const to = filters?.to && dateRe.test(filters.to) ? filters.to : undefined
 
   const { data: users } = await supabase
     .from('shopfloor_users')
@@ -559,20 +572,40 @@ export async function getOperatorDailyReport() {
 
   if (!users) return []
 
-  const { data: sessions } = await supabase
+  let sessionQuery = supabase
     .from('sessions')
     .select('id, user_id, session_type, mo_number, started_at, ended_at, machine:machines(machine_code, description), user:shopfloor_users!user_id(shift:shift_patterns(end_time))')
     .not('session_type', 'eq', 'UNMANNED')
     .order('started_at', { ascending: false })
+
+  // Only fetch sessions that can overlap the window (still-open ones always do).
+  if (from) {
+    const [y, m, d] = from.split('-').map(Number)
+    const fromIso = new Date(londonWallClockToMs(y, m, d, 0, 0)).toISOString()
+    sessionQuery = sessionQuery.or(`ended_at.is.null,ended_at.gte.${fromIso}`)
+  }
+  if (to) {
+    const [y, m, d] = to.split('-').map(Number)
+    const toIso = new Date(londonWallClockToMs(y, m, d + 1, 0, 0)).toISOString()
+    sessionQuery = sessionQuery.lt('started_at', toIso)
+  }
+  const { data: sessions } = await sessionQuery
 
   const { events: eventsBySession, overrunAuthorised } = await fetchTimingEvents(
     supabase,
     (sessions ?? []).map(s => s.id),
   )
 
-  // user -> day -> { minutes, entries map keyed by machine|mo|type }
-  type Entry = { machine_code: string; description: string | null; mo_number: string; session_type: string; minutes: number }
-  type DayAgg = { minutes: number; entries: Map<string, Entry> }
+  // user -> day -> { minutes, lastMs, entries map keyed by machine|mo|type }
+  type Entry = {
+    machine_code: string
+    description: string | null
+    mo_number: string
+    session_type: string
+    minutes: number
+    lastMs: number
+  }
+  type DayAgg = { minutes: number; lastMs: number; entries: Map<string, Entry> }
   const byUser = new Map<string, Map<string, DayAgg>>()
 
   for (const s of sessions ?? []) {
@@ -581,7 +614,6 @@ export async function getOperatorDailyReport() {
       startMs: new Date(s.started_at).getTime(),
       overrunAuthorised: overrunAuthorised.has(s.id),
     })
-    const perDay = minutesByDay(intervals)
     const machineCode = (s.machine as any)?.machine_code ?? 'Unknown'
     const description = (s.machine as any)?.description ?? null
     const entryKey = `${machineCode}|${s.mo_number}|${s.session_type}`
@@ -589,46 +621,75 @@ export async function getOperatorDailyReport() {
     let days = byUser.get(s.user_id)
     if (!days) { days = new Map(); byUser.set(s.user_id, days) }
 
-    for (const [day, minutes] of Object.entries(perDay)) {
-      if (minutes <= 0) continue
-      let agg = days.get(day)
-      if (!agg) { agg = { minutes: 0, entries: new Map() }; days.set(day, agg) }
-      agg.minutes += minutes
-      const existing = agg.entries.get(entryKey)
-      if (existing) {
-        existing.minutes += minutes
-      } else {
-        agg.entries.set(entryKey, {
-          machine_code: machineCode,
-          description,
-          mo_number: s.mo_number as string,
-          session_type: s.session_type as string,
-          minutes,
-        })
+    // Walk each interval day by day so we know both the minutes worked on a
+    // day and the moment the latest work on that day finished.
+    for (const [intStart, intEnd] of intervals) {
+      let cur = intStart
+      while (cur < intEnd) {
+        const segEnd = Math.min(intEnd, nextLondonMidnight(cur))
+        const day = londonDayKey(cur)
+        const minutes = (segEnd - cur) / 60000
+        cur = segEnd
+        if (minutes <= 0) continue
+        if ((from && day < from) || (to && day > to)) continue
+
+        let agg = days.get(day)
+        if (!agg) { agg = { minutes: 0, lastMs: 0, entries: new Map() }; days.set(day, agg) }
+        agg.minutes += minutes
+        agg.lastMs = Math.max(agg.lastMs, segEnd)
+        const existing = agg.entries.get(entryKey)
+        if (existing) {
+          existing.minutes += minutes
+          existing.lastMs = Math.max(existing.lastMs, segEnd)
+        } else {
+          agg.entries.set(entryKey, {
+            machine_code: machineCode,
+            description,
+            mo_number: s.mo_number as string,
+            session_type: s.session_type as string,
+            minutes,
+            lastMs: segEnd,
+          })
+        }
       }
     }
   }
 
-  return users.map(u => {
+  const people = users.map(u => {
     const days = byUser.get(u.id) ?? new Map<string, DayAgg>()
-    const dayList = [...days.entries()]
+    const dayAggs = [...days.entries()]
       .map(([date, agg]) => ({
         date,
+        lastMs: agg.lastMs,
         hours: Math.round((agg.minutes / 60) * 10) / 10,
         entries: [...agg.entries.values()]
-          .map(e => ({ ...e, hours: Math.round((e.minutes / 60) * 10) / 10 }))
-          .sort((a, b) => b.minutes - a.minutes),
+          .sort((a, b) => b.lastMs - a.lastMs)
+          .map(({ lastMs, ...e }) => ({
+            ...e,
+            hours: Math.round((e.minutes / 60) * 10) / 10,
+            last_worked_at: new Date(lastMs).toISOString(),
+          })),
       }))
       .filter(d => d.hours > 0)
-      .sort((a, b) => (a.date < b.date ? 1 : -1)) // most recent day first
-    const totalHours = Math.round(dayList.reduce((s, d) => s + d.hours, 0) * 10) / 10
+      .sort((a, b) => b.lastMs - a.lastMs) // most recent work first
+    const totalHours = Math.round(dayAggs.reduce((s, d) => s + d.hours, 0) * 10) / 10
+    const lastMs = dayAggs.length ? dayAggs[0].lastMs : 0
     return {
       id: u.id,
       display_name: u.display_name,
       role: u.role,
       total_hours: totalHours,
-      days: dayList,
+      last_worked_at: lastMs ? new Date(lastMs).toISOString() : null,
+      days: dayAggs.map(({ lastMs: _l, ...d }) => d),
     }
+  })
+
+  // People who worked most recently first; people with no work in range last.
+  return people.sort((a, b) => {
+    if (a.last_worked_at && b.last_worked_at) return a.last_worked_at < b.last_worked_at ? 1 : -1
+    if (a.last_worked_at) return -1
+    if (b.last_worked_at) return 1
+    return a.display_name.localeCompare(b.display_name)
   })
 }
 
