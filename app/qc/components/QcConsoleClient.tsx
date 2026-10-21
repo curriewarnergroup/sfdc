@@ -4,6 +4,7 @@ import { useState, useTransition, useRef, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   issueQcCode,
+  passLastOff,
   recordQcFail,
   lookupQcUser,
   qcLogout,
@@ -104,6 +105,21 @@ export function QcConsoleClient({ machines, history: initialHistory, qcUser }: P
     if (!canSubmit || !resolvedMachine) return
     setFormError('')
     startTransition(async () => {
+      if (codeType === 'LAST_OFF') {
+        const res = await passLastOff({
+          moNumber: moNumber.trim().toUpperCase(),
+          machineId: resolvedMachine.id,
+          issuedByUserCode: scannedUser?.user_code ?? qcUser.user_code,
+        })
+        if (res.ok) {
+          setIssued({ code: '', type: 'LAST_OFF', result: 'PASS' })
+          router.refresh()
+        } else {
+          setFormError(res.error ?? 'Failed to end the job.')
+        }
+        return
+      }
+
       const res = await issueQcCode({
         codeType,
         moNumber: moNumber.trim().toUpperCase(),
@@ -207,7 +223,7 @@ export function QcConsoleClient({ machines, history: initialHistory, qcUser }: P
         </div>
       </header>
 
-      {/* ── Body ─────────────────────────────────────────���─────────────────── */}
+      {/* ── Body ─────────────────────────────────────────���─────��───────────── */}
       <main className="flex-1 max-w-3xl mx-auto w-full p-4 md:p-6">
         {/* Tabs */}
         <div className="flex gap-1 bg-card rounded-xl border border-border p-1 mb-6">
@@ -295,6 +311,11 @@ export function QcConsoleClient({ machines, history: initialHistory, qcUser }: P
                       </button>
                     ))}
                   </div>
+                  {codeType === 'LAST_OFF' && (
+                    <p className="text-xs text-muted-foreground">
+                      No code needed. Passing a last-off ends the job on this machine and archives it.
+                    </p>
+                  )}
                 </Section>
 
                 {/* Section: FAIL notes */}
@@ -337,7 +358,9 @@ export function QcConsoleClient({ machines, history: initialHistory, qcUser }: P
                     style={{ flex: 2 }}
                   >
                     <CheckCircle2 className="w-5 h-5" />
-                    {pending ? 'Generating…' : 'Pass — Issue Code'}
+                    {pending
+                      ? codeType === 'LAST_OFF' ? 'Ending job…' : 'Generating…'
+                      : codeType === 'LAST_OFF' ? 'Pass — End Job' : 'Pass — Issue Code'}
                   </button>
                 </div>
               </div>
@@ -489,7 +512,15 @@ function IssuedCodeDisplay({
         </span>
       </div>
 
-      {isPass ? (
+      {isPass && issued.type === 'LAST_OFF' ? (
+        <div className="text-center py-4 space-y-2">
+          <CheckCircle2 className="w-12 h-12 text-status-running mx-auto" />
+          <p className="font-bold text-foreground">Job ended</p>
+          <p className="text-sm text-muted-foreground">
+            The run has been closed and archived. It no longer appears in live reports, but its data is kept.
+          </p>
+        </div>
+      ) : isPass ? (
         <>
           <div>
             <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
@@ -526,7 +557,7 @@ function IssuedCodeDisplay({
         className="w-full h-12 rounded-xl bg-primary text-primary-foreground font-bold uppercase tracking-widest flex items-center justify-center gap-2"
       >
         <Plus className="w-4 h-4" />
-        Issue Another Code
+        {issued.type === 'LAST_OFF' && isPass ? 'Record Another Check' : 'Issue Another Code'}
       </button>
     </div>
   )

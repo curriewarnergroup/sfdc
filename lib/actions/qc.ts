@@ -187,6 +187,89 @@ export async function issueQcCode(params: {
   return { ok: true, data: { plainCode, code } }
 }
 
+// A passed last-off needs no code: it ends the live run for this MO + machine
+// straight away. The session is kept (status FINISHED) so history and reports
+// still show it, but it drops out of every live view.
+export async function passLastOff(params: {
+  moNumber: string
+  machineId: string
+  issuedByUserCode: string
+}): Promise<ActionResult<{ endedSessions: number }>> {
+  const supabase = createServiceClient()
+  const moNumber = params.moNumber.trim().toUpperCase()
+
+  const { data: qcUser } = await supabase
+    .from('shopfloor_users')
+    .select('id, role')
+    .eq('user_code', params.issuedByUserCode.trim())
+    .eq('is_active', true)
+    .single()
+
+  if (!qcUser) return { ok: false, error: 'QC user code not found.' }
+  if (!['QC', 'ADMIN'].includes(qcUser.role)) {
+    return { ok: false, error: 'User does not have QC role.' }
+  }
+
+  const { data: liveSessions } = await supabase
+    .from('sessions')
+    .select('id')
+    .eq('mo_number', moNumber)
+    .eq('machine_id', params.machineId)
+    .in('session_type', ['RUN', 'UNMANNED'])
+    .in('status', ['ACTIVE', 'PAUSED'])
+
+  if (!liveSessions || liveSessions.length === 0) {
+    return {
+      ok: false,
+      error: `No live run found for ${moNumber} on this machine. Check the MO number and machine.`,
+    }
+  }
+
+  const sessionIds = liveSessions.map((s) => s.id)
+  const now = new Date().toISOString()
+
+  const { error: updateErr } = await supabase
+    .from('sessions')
+    .update({ status: 'FINISHED', ended_at: now })
+    .in('id', sessionIds)
+    .in('status', ['ACTIVE', 'PAUSED'])
+
+  if (updateErr) return { ok: false, error: 'Could not end the job.' }
+
+  // Audit record so the pass still appears in QC history (already redeemed, no code to hand over)
+  await supabase.from('qc_codes').insert({
+    code_hash: crypto.randomBytes(32).toString('hex'),
+    code_type: 'LAST_OFF',
+    mo_number: moNumber,
+    machine_id: params.machineId,
+    issued_by: qcUser.id,
+    result: 'PASS',
+    expires_at: now,
+    redeemed: true,
+    redeemed_at: now,
+    redeemed_by: qcUser.id,
+  })
+
+  await supabase.from('session_events').insert([
+    ...sessionIds.map((sessionId) => ({
+      session_id: sessionId,
+      event_type: 'QC_CODE_REDEEMED' as const,
+      actor_user_id: qcUser.id,
+      device_id: null,
+      metadata: { code_type: 'LAST_OFF', result: 'PASS', no_code: true },
+    })),
+    ...sessionIds.map((sessionId) => ({
+      session_id: sessionId,
+      event_type: 'SESSION_FINISH' as const,
+      actor_user_id: qcUser.id,
+      device_id: null,
+      metadata: { last_off_result: 'PASS', ended_by: 'QC_PASS', archived: true },
+    })),
+  ])
+
+  return { ok: true, data: { endedSessions: sessionIds.length } }
+}
+
 export async function getQcHistory(params?: {
   moNumber?: string
   machineId?: string
