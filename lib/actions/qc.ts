@@ -194,7 +194,7 @@ export async function passLastOff(params: {
   moNumber: string
   machineId: string
   issuedByUserCode: string
-}): Promise<ActionResult<{ endedSessions: number }>> {
+}): Promise<ActionResult<{ endedSessions: number; skippedProcess: boolean }>> {
   const supabase = createServiceClient()
   const moNumber = params.moNumber.trim().toUpperCase()
 
@@ -218,23 +218,21 @@ export async function passLastOff(params: {
     .in('session_type', ['RUN', 'UNMANNED'])
     .in('status', ['ACTIVE', 'PAUSED'])
 
-  if (!liveSessions || liveSessions.length === 0) {
-    return {
-      ok: false,
-      error: `No live run found for ${moNumber} on this machine. Check the MO number and machine.`,
-    }
-  }
-
-  const sessionIds = liveSessions.map((s) => s.id)
+  const sessionIds = (liveSessions ?? []).map((s) => s.id)
   const now = new Date().toISOString()
 
-  const { error: updateErr } = await supabase
-    .from('sessions')
-    .update({ status: 'FINISHED', ended_at: now })
-    .in('id', sessionIds)
-    .in('status', ['ACTIVE', 'PAUSED'])
+  // A last-off with no first-off or no run at all is still recorded: it shows the job skipped the process.
+  const skippedProcess = await detectSkippedProcess(supabase, moNumber, params.machineId)
 
-  if (updateErr) return { ok: false, error: 'Could not end the job.' }
+  if (sessionIds.length > 0) {
+    const { error: updateErr } = await supabase
+      .from('sessions')
+      .update({ status: 'FINISHED', ended_at: now })
+      .in('id', sessionIds)
+      .in('status', ['ACTIVE', 'PAUSED'])
+
+    if (updateErr) return { ok: false, error: 'Could not end the job.' }
+  }
 
   // Audit record so the pass still appears in QC history (already redeemed, no code to hand over)
   await supabase.from('qc_codes').insert({
@@ -250,24 +248,72 @@ export async function passLastOff(params: {
     redeemed_by: qcUser.id,
   })
 
-  await supabase.from('session_events').insert([
-    ...sessionIds.map((sessionId) => ({
-      session_id: sessionId,
-      event_type: 'QC_CODE_REDEEMED' as const,
+  if (sessionIds.length > 0) {
+    await supabase.from('session_events').insert([
+      ...sessionIds.map((sessionId) => ({
+        session_id: sessionId,
+        event_type: 'QC_CODE_REDEEMED' as const,
+        actor_user_id: qcUser.id,
+        device_id: null,
+        metadata: { code_type: 'LAST_OFF', result: 'PASS', no_code: true },
+      })),
+      ...sessionIds.map((sessionId) => ({
+        session_id: sessionId,
+        event_type: 'SESSION_FINISH' as const,
+        actor_user_id: qcUser.id,
+        device_id: null,
+        metadata: {
+          last_off_result: 'PASS',
+          ended_by: 'QC_PASS',
+          archived: true,
+          skipped_process: skippedProcess,
+        },
+      })),
+    ])
+  } else {
+    await supabase.from('session_events').insert({
+      session_id: null,
+      event_type: 'QC_CODE_ISSUED',
       actor_user_id: qcUser.id,
       device_id: null,
-      metadata: { code_type: 'LAST_OFF', result: 'PASS', no_code: true },
-    })),
-    ...sessionIds.map((sessionId) => ({
-      session_id: sessionId,
-      event_type: 'SESSION_FINISH' as const,
-      actor_user_id: qcUser.id,
-      device_id: null,
-      metadata: { last_off_result: 'PASS', ended_by: 'QC_PASS', archived: true },
-    })),
-  ])
+      metadata: {
+        code_type: 'LAST_OFF',
+        result: 'PASS',
+        no_code: true,
+        mo_number: moNumber,
+        machine_id: params.machineId,
+        skipped_process: true,
+      },
+    })
+  }
 
-  return { ok: true, data: { endedSessions: sessionIds.length } }
+  return { ok: true, data: { endedSessions: sessionIds.length, skippedProcess } }
+}
+
+type ServiceClient = ReturnType<typeof createServiceClient>
+
+// Skipped process = the MO never had a run on this machine, or never had a passed first-off.
+async function detectSkippedProcess(
+  supabase: ServiceClient,
+  moNumber: string,
+  machineId: string
+): Promise<boolean> {
+  const [{ count: runCount }, { count: firstOffCount }] = await Promise.all([
+    supabase
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('mo_number', moNumber)
+      .eq('machine_id', machineId)
+      .in('session_type', ['RUN', 'UNMANNED']),
+    supabase
+      .from('qc_codes')
+      .select('id', { count: 'exact', head: true })
+      .eq('mo_number', moNumber)
+      .eq('machine_id', machineId)
+      .eq('code_type', 'FIRST_OFF')
+      .eq('result', 'PASS'),
+  ])
+  return (runCount ?? 0) === 0 || (firstOffCount ?? 0) === 0
 }
 
 export async function getQcHistory(params?: {
@@ -288,7 +334,36 @@ export async function getQcHistory(params?: {
   if (params?.machineId) query = query.eq('machine_id', params.machineId)
 
   const { data } = await query
-  return data ?? []
+  const rows = data ?? []
+
+  const lastOffMos = [
+    ...new Set(rows.filter((r) => r.code_type === 'LAST_OFF').map((r) => r.mo_number as string)),
+  ]
+  if (lastOffMos.length === 0) return rows
+
+  const [{ data: runs }, { data: firstOffs }] = await Promise.all([
+    supabase
+      .from('sessions')
+      .select('mo_number, machine_id, started_at')
+      .in('mo_number', lastOffMos)
+      .in('session_type', ['RUN', 'UNMANNED']),
+    supabase
+      .from('qc_codes')
+      .select('mo_number, machine_id, created_at')
+      .in('mo_number', lastOffMos)
+      .eq('code_type', 'FIRST_OFF')
+      .eq('result', 'PASS'),
+  ])
+
+  // A last-off is a skipped process when no run and/or no passed first-off came before it
+  return rows.map((row) => {
+    if (row.code_type !== 'LAST_OFF') return row
+    const matches = (r: { mo_number: string; machine_id: string }) =>
+      r.mo_number === row.mo_number && r.machine_id === row.machine_id
+    const hadRun = (runs ?? []).some((r) => matches(r) && r.started_at <= row.created_at)
+    const hadFirstOff = (firstOffs ?? []).some((r) => matches(r) && r.created_at <= row.created_at)
+    return { ...row, skipped_process: !hadRun || !hadFirstOff }
+  })
 }
 
 export async function getActiveSessions() {

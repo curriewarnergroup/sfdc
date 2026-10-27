@@ -126,6 +126,8 @@ export interface QcCode {
   machine?: Machine
   issuer?: ShopfloorUser
   redeemer?: ShopfloorUser
+  // derived in getQcHistory for LAST_OFF rows
+  skipped_process?: boolean
 }
 
 // ---- Server-action return types ----

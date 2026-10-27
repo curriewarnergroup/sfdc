@@ -72,7 +72,12 @@ export function QcConsoleClient({ machines, history: initialHistory, qcUser }: P
   const [pending, startTransition] = useTransition()
 
   // Issued code display
-  const [issued, setIssued] = useState<{ code: string; type: CodeType; result: QcResult } | null>(null)
+  const [issued, setIssued] = useState<{
+    code: string
+    type: CodeType
+    result: QcResult
+    skippedProcess?: boolean
+  } | null>(null)
   // Fail confirmation
   const [failRecorded, setFailRecorded] = useState(false)
 
@@ -112,7 +117,12 @@ export function QcConsoleClient({ machines, history: initialHistory, qcUser }: P
           issuedByUserCode: scannedUser?.user_code ?? qcUser.user_code,
         })
         if (res.ok) {
-          setIssued({ code: '', type: 'LAST_OFF', result: 'PASS' })
+          setIssued({
+            code: '',
+            type: 'LAST_OFF',
+            result: 'PASS',
+            skippedProcess: res.data?.skippedProcess ?? false,
+          })
           router.refresh()
         } else {
           setFormError(res.error ?? 'Failed to end the job.')
@@ -313,7 +323,8 @@ export function QcConsoleClient({ machines, history: initialHistory, qcUser }: P
                   </div>
                   {codeType === 'LAST_OFF' && (
                     <p className="text-xs text-muted-foreground">
-                      No code needed. Passing a last-off ends the job on this machine and archives it.
+                      No code needed. Passing a last-off ends the job on this machine and archives it. If the job never
+                      ran or had no first-off, the last-off is still recorded and flagged as a skipped process.
                     </p>
                   )}
                 </Section>
@@ -486,7 +497,7 @@ function IssuedCodeDisplay({
   issued,
   onReset,
 }: {
-  issued: { code: string; type: CodeType; result: QcResult }
+  issued: { code: string; type: CodeType; result: QcResult; skippedProcess?: boolean }
   onReset: () => void
 }) {
   const [copied, setCopied] = useState(false)
@@ -515,9 +526,13 @@ function IssuedCodeDisplay({
       {isPass && issued.type === 'LAST_OFF' ? (
         <div className="text-center py-4 space-y-2">
           <CheckCircle2 className="w-12 h-12 text-status-running mx-auto" />
-          <p className="font-bold text-foreground">Job ended</p>
+          <p className="font-bold text-foreground">
+            {issued.skippedProcess ? 'Last-off recorded: process skipped' : 'Job ended'}
+          </p>
           <p className="text-sm text-muted-foreground">
-            The run has been closed and archived. It no longer appears in live reports, but its data is kept.
+            {issued.skippedProcess
+              ? 'This job had no run and/or no first-off before reaching last-off. It has been recorded and flagged as a skipped process.'
+              : 'The run has been closed and archived. It no longer appears in live reports, but its data is kept.'}
           </p>
         </div>
       ) : isPass ? (
@@ -600,6 +615,7 @@ function HistoryTable({ history }: { history: QcCode[] }) {
                     <span className="px-2 py-0.5 rounded text-xs font-bold bg-secondary text-secondary-foreground uppercase">
                       {code.code_type.replace('_', '-')}
                     </span>
+                    {code.skipped_process && <SkippedBadge />}
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     <span className={`px-2 py-0.5 rounded text-xs font-bold uppercase ${
@@ -649,6 +665,7 @@ function HistoryTable({ history }: { history: QcCode[] }) {
                 <span className="px-2 py-0.5 rounded bg-secondary text-secondary-foreground font-bold uppercase">
                   {code.code_type.replace('_', '-')}
                 </span>
+                {code.skipped_process && <SkippedBadge />}
                 {code.redeemed && (
                   <span>Used by {(code as any).redeemer?.display_name ?? '—'} at {fmt(code.redeemed_at)}</span>
                 )}
@@ -659,6 +676,14 @@ function HistoryTable({ history }: { history: QcCode[] }) {
         })}
       </div>
     </div>
+  )
+}
+
+function SkippedBadge() {
+  return (
+    <span className="ml-2 px-2 py-0.5 rounded text-xs font-bold uppercase bg-destructive/20 text-destructive-foreground whitespace-nowrap">
+      Skipped process
+    </span>
   )
 }
 
